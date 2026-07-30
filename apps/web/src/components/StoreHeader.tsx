@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { formatBDT, type OfferDto, type PublicTenant } from '@foodhub/shared';
+import { estimateEta, formatBDT, formatEta, type OfferDto, type PublicTenant } from '@foodhub/shared';
 import { Dish } from './Media';
 import { Icon } from './Icon';
 import { OfferStrip } from './Offers';
@@ -236,7 +236,17 @@ function StatGrid({ tenant }: { tenant: PublicTenant }) {
     <dl className="mt-3.5 flex divide-x divide-surface-edge rounded-xl border border-surface-edge">
       <Stat
         icon="clock"
-        value={`${pickup ? tenant.pickupMinutes : tenant.prepMinutes} min`}
+        // The whole wait, kitchen plus rider — the number on the card and the number
+        // here have to be the same promise, or one of them is a lie.
+        value={formatEta(
+          estimateEta({
+            prepMinutes: tenant.prepMinutes,
+            deliveryMinutes: tenant.deliveryMinutes ?? 20,
+            pickupMinutes: tenant.pickupMinutes,
+            fulfillment: pickup ? 'PICKUP' : 'DELIVERY',
+            distanceKm: tenant.distanceKm,
+          }),
+        )}
         label={pickup ? 'Ready for pickup' : 'Delivery time'}
       />
       <Stat

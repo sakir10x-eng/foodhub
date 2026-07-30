@@ -263,6 +263,21 @@ export const orderStatusUpdateSchema = z.object({
   note: z.string().trim().max(300).optional(),
 });
 
+/**
+ * A customer calling off their own order.
+ *
+ * Authorised exactly like guest tracking — order code plus the phone it was placed with
+ * — so it works for someone who never made an account, which is most of them. A reason
+ * is asked for but not required: a cancel button that interrogates you gets abandoned,
+ * and the vendor learns more from the ones people do answer.
+ */
+export const orderCancelSchema = z.object({
+  code: z.string().trim().min(3).max(20),
+  phone: bdPhone,
+  reason: z.string().trim().max(300).optional(),
+});
+export type OrderCancelInput = z.infer<typeof orderCancelSchema>;
+
 /* --------------------------------------------------------------- tenants */
 
 export const geoPointSchema = z.object({
@@ -304,6 +319,13 @@ export const tenantSettingsSchema = z.object({
   isOpen: z.boolean().optional(),
   listedOnMarketplace: z.boolean().optional(),
   prepMinutes: z.number().int().min(1).max(240).optional(),
+  /** The rider leg, used for the quoted arrival window when no pin has been dropped. */
+  deliveryMinutes: z.number().int().min(1).max(240).optional(),
+  /**
+   * Marketplace filter chips. Capped at six because a restaurant that claims eight
+   * cuisines matches every filter and therefore describes nothing.
+   */
+  cuisines: z.array(z.string().trim().min(2).max(30)).max(6).optional(),
   deliveryZones: z.array(deliveryZoneSchema).max(50).optional(),
 
   /** Orders placed for a later time. */

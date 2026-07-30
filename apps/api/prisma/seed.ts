@@ -62,6 +62,8 @@ interface VendorSpec {
   plan: 'FREE' | 'BASIC' | 'PRO';
   listed: boolean;
   commissionBps: number;
+  /** Marketplace filter chips. */
+  cuisines: string[];
   categories: { name: string; items: [string, number, string][] }[];
 }
 
@@ -78,6 +80,7 @@ const VENDORS: VendorSpec[] = [
     plan: 'PRO',
     listed: true,
     commissionBps: 1500,
+    cuisines: ['Kacchi', 'Biryani', 'Bangladeshi'],
     categories: [
       {
         name: 'Kacchi & Biryani',
@@ -118,6 +121,7 @@ const VENDORS: VendorSpec[] = [
     plan: 'BASIC',
     listed: true,
     commissionBps: 1800,
+    cuisines: ['Pizza', 'Fast Food', 'Burger'],
     categories: [
       {
         name: 'Pizza',
@@ -151,6 +155,7 @@ const VENDORS: VendorSpec[] = [
     plan: 'FREE',
     listed: false, // Mode A only — storefront live, not yet on the marketplace
     commissionBps: 1500,
+    cuisines: ['Tea & Coffee', 'Snacks', 'Breakfast'],
     categories: [
       {
         name: 'Tea',
@@ -260,6 +265,10 @@ async function main() {
         commissionRateBps: spec.commissionBps,
         isOpen: true,
         prepMinutes: spec.slug === 'chai-adda' ? 10 : 30,
+        // A tea shop three streets away is not a twenty-minute ride; the demo should show
+        // the arrival window actually differing between vendors rather than one constant.
+        deliveryMinutes: spec.slug === 'chai-adda' ? 10 : 20,
+        cuisines: spec.cuisines,
         deliveryZones: (spec.slug === 'chai-adda' ? WALKING_ZONES(spec.lat, spec.lng) : ZONES) as any,
         // Phase 4 demo state: the two marketplace vendors run a loyalty programme and
         // the flagship also has the AI assistant switched on.

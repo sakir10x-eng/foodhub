@@ -13,6 +13,7 @@ import type { Response } from 'express';
 import {
   checkoutSchema,
   marketplaceCheckoutSchema,
+  orderCancelSchema,
   orderStatusUpdateSchema,
   reviewSchema,
   OrderStatus,
@@ -149,6 +150,17 @@ class CustomerOrdersController {
   @Post('orders/review')
   review(@Body(new ZodBody(reviewSchema)) dto: any) {
     return this.reviews.submit(dto);
+  }
+
+  /**
+   * Call off an order. Same guest authorisation as tracking, because the customer who
+   * needs this most is the one who ordered without making an account.
+   */
+  @Public()
+  @PlatformScope('a guest cancels their own order, identified by code + phone')
+  @Post('orders/cancel')
+  cancel(@Body(new ZodBody(orderCancelSchema)) dto: { code: string; phone: string; reason?: string }) {
+    return this.orders.cancelByCustomer(dto.code, dto.phone, dto.reason);
   }
 
   @Roles('CUSTOMER')

@@ -58,6 +58,15 @@ model Tenant {
   isOpen      Boolean @default(true)
   prepMinutes Int     @default(25)
 
+  /// The rider leg, in minutes. Added to prepMinutes for the quoted arrival window when
+  /// the customer has not dropped a pin; when they have, distance may push it higher but
+  /// never lower — the vendor's number already includes the counter wait and the lift.
+  deliveryMinutes Int @default(20)
+
+  /// Marketplace filter chips ("Biryani", "Chinese"). Free-form on purpose — see
+  /// @foodhub/shared cuisines.ts. Indexed for the filter query.
+  cuisines String[] @default([])
+
   /// DeliveryZone[] — see @foodhub/shared pricing.ts
   deliveryZones Json @default("[]")
 
@@ -183,6 +192,9 @@ model Tenant {
   riders              Rider[]
 
   @@index([listedOnMarketplace, isOpen])
+  /// GIN: the marketplace filter asks whether the array CONTAINS a tag, which a btree
+  /// index cannot answer without scanning every vendor.
+  @@index([cuisines], type: Gin)
   @@map("tenants")
 }
 

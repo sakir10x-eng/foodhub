@@ -10,6 +10,8 @@ import {
   PublicTenant,
   TenantSettingsInput,
   VendorSummary,
+  estimateEta,
+  normaliseCuisine,
 } from '@foodhub/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { CryptoService } from '../common/crypto.service';
@@ -86,7 +88,7 @@ export class TenantService {
     const data: Record<string, unknown> = {};
     for (const key of [
       'name', 'tagline', 'brandColor', 'phone', 'address', 'lat', 'lng',
-      'isOpen', 'listedOnMarketplace', 'prepMinutes',
+      'isOpen', 'listedOnMarketplace', 'prepMinutes', 'deliveryMinutes',
       // Phase 4: loyalty + AI assistant configuration.
       'loyaltyEnabled', 'pointsPerHundred', 'pointValue', 'minRedeemPoints',
       'aiAssistantEnabled', 'aiPersona',
@@ -102,6 +104,17 @@ export class TenantService {
     }
     if (input.logoId !== undefined) data.logoId = input.logoId;
     if (input.coverId !== undefined) data.coverId = input.coverId;
+    if (input.cuisines !== undefined) {
+      // Normalise before storing, not on read: the filter query matches the stored value
+      // exactly, so "fast food" and "Fast Food" saved as-is would be two chips that each
+      // find half the vendors.
+      const unique = new Map<string, string>();
+      for (const raw of input.cuisines) {
+        const tag = normaliseCuisine(raw);
+        if (tag) unique.set(tag.toLowerCase(), tag);
+      }
+      data.cuisines = [...unique.values()];
+    }
     if (input.deliveryZones !== undefined) {
       if (input.deliveryZones.length === 0) {
         throw new BadRequestException('Keep at least one delivery zone');
@@ -355,6 +368,15 @@ export class TenantService {
         advanceThreshold: tenant.advanceThreshold ?? 0,
       },
       minDeliveryFee: zones.length ? Math.min(...zones.map((z) => z.fee)) : 0,
+      cuisines: tenant.cuisines ?? [],
+      deliveryMinutes: tenant.deliveryMinutes ?? 20,
+      // The distance-free window. A marketplace listing that knows how far the customer
+      // is overwrites this with a sharper one; see MarketplaceService.nearMe.
+      eta: estimateEta({
+        prepMinutes: tenant.prepMinutes,
+        deliveryMinutes: tenant.deliveryMinutes ?? 20,
+        pickupMinutes: tenant.pickupMinutes ?? 15,
+      }),
     };
   }
 

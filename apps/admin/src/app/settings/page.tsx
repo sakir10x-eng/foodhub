@@ -1,7 +1,14 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { PLAN_FEATURES, taka, type DeliveryZone, type Entitlements } from '@foodhub/shared';
+import {
+  PLAN_FEATURES,
+  SUGGESTED_CUISINES,
+  normaliseCuisine,
+  taka,
+  type DeliveryZone,
+  type Entitlements,
+} from '@foodhub/shared';
 import { adminApi } from '../../lib/auth';
 import { Banner, PageHeader, Shell } from '../../components/Shell';
 import { DeliveryZones } from '../../components/DeliveryZones';
@@ -12,7 +19,8 @@ import { OpeningHours } from '../../components/OpeningHours';
 interface Settings {
   id: string; slug: string; name: string; tagline: string; brandColor: string;
   phone: string; address: string; lat: number | null; lng: number | null;
-  isOpen: boolean; listedOnMarketplace: boolean; prepMinutes: number;
+  isOpen: boolean; listedOnMarketplace: boolean; prepMinutes: number; deliveryMinutes: number;
+  cuisines: string[];
   commissionRateBps: number; plan: string; planStatus: string;
   loyaltyEnabled: boolean; pointsPerHundred: number; pointValue: number; minRedeemPoints: number;
   aiAssistantEnabled: boolean; aiPersona: string;
@@ -169,10 +177,21 @@ function StoreSettings() {
             onSave={(v) => patch({ prepMinutes: Number(v) })}
           />
           <Field
+            label="Delivery time (minutes)" type="number" defaultValue={String(settings.deliveryMinutes ?? 20)}
+            hint="Added to preparation time for the arrival window customers see. When they drop a pin, a longer distance may push it higher — never lower."
+            onSave={(v) => patch({ deliveryMinutes: Number(v) })}
+          />
+          <Field
             label="Brand colour" type="color" defaultValue={settings.brandColor}
             onSave={(brandColor) => patch({ brandColor })}
           />
         </Fieldset>
+
+        <CuisineTags
+          selected={settings.cuisines ?? []}
+          busy={busy}
+          onSave={(cuisines) => patch({ cuisines })}
+        />
 
         <OpeningHours
           hours={settings.openingHours ?? []}
@@ -477,9 +496,9 @@ function Fieldset({ title, children }: { title: string; children: React.ReactNod
 
 /** Save-on-blur: a vendor editing one field shouldn't have to hunt for a Save button. */
 function Field({
-  label, defaultValue, onSave, type = 'text',
+  label, defaultValue, onSave, type = 'text', hint,
 }: {
-  label: string; defaultValue: string; onSave: (value: string) => void; type?: string;
+  label: string; defaultValue: string; onSave: (value: string) => void; type?: string; hint?: string;
 }) {
   const [value, setValue] = useState(defaultValue);
   useEffect(() => setValue(defaultValue), [defaultValue]);
@@ -492,7 +511,95 @@ function Field({
         onChange={(e) => setValue(e.target.value)}
         onBlur={() => value !== defaultValue && onSave(value)}
       />
+      {hint && <span className="mt-1 block text-xs text-ink-muted">{hint}</span>}
     </label>
+  );
+}
+
+/**
+ * The vendor's cuisine tags — what the marketplace filter chips match on.
+ *
+ * Suggestions are one tap; anything else can be typed. Capped at six by the same rule the
+ * server enforces: a restaurant that claims eight cuisines matches every filter and so
+ * describes nothing, which makes the filters useless for everybody else too.
+ */
+function CuisineTags({
+  selected, busy, onSave,
+}: {
+  selected: string[]; busy: boolean; onSave: (tags: string[]) => void;
+}) {
+  const [tags, setTags] = useState<string[]>(selected);
+  const [custom, setCustom] = useState('');
+  useEffect(() => setTags(selected), [selected]);
+
+  const MAX = 6;
+  const has = (t: string) => tags.some((x) => x.toLowerCase() === t.toLowerCase());
+  const commit = (next: string[]) => {
+    setTags(next);
+    onSave(next);
+  };
+  const toggle = (tag: string) => {
+    if (has(tag)) commit(tags.filter((x) => x.toLowerCase() !== tag.toLowerCase()));
+    else if (tags.length < MAX) commit([...tags, normaliseCuisine(tag)]);
+  };
+
+  return (
+    <Fieldset title="Cuisines">
+      <p className="text-xs text-ink-muted">
+        These are the filter chips customers use on the marketplace. Pick up to {MAX}.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        {SUGGESTED_CUISINES.map((tag) => (
+          <button
+            key={tag}
+            type="button"
+            disabled={busy || (!has(tag) && tags.length >= MAX)}
+            onClick={() => toggle(tag)}
+            className={`rounded-full border px-3 py-1.5 text-sm transition disabled:opacity-40 ${
+              has(tag)
+                ? 'border-brand bg-brand text-white'
+                : 'border-surface-line text-ink-muted hover:border-brand hover:text-brand'
+            }`}
+          >
+            {tag}
+          </button>
+        ))}
+      </div>
+      {/* Anything the vendor sells that our list has never heard of. */}
+      {tags.filter((t) => !SUGGESTED_CUISINES.some((s) => s.toLowerCase() === t.toLowerCase())).length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {tags
+            .filter((t) => !SUGGESTED_CUISINES.some((s) => s.toLowerCase() === t.toLowerCase()))
+            .map((tag) => (
+              <button
+                key={tag}
+                type="button"
+                disabled={busy}
+                onClick={() => toggle(tag)}
+                className="rounded-full border border-brand bg-brand px-3 py-1.5 text-sm text-white"
+              >
+                {tag} ✕
+              </button>
+            ))}
+        </div>
+      )}
+      <div className="flex gap-2">
+        <input
+          className="field flex-1"
+          placeholder="Something else — e.g. Afghani"
+          value={custom}
+          maxLength={30}
+          onChange={(e) => setCustom(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key !== 'Enter') return;
+            e.preventDefault();
+            const tag = normaliseCuisine(custom);
+            if (tag.length >= 2 && !has(tag) && tags.length < MAX) commit([...tags, tag]);
+            setCustom('');
+          }}
+        />
+      </div>
+    </Fieldset>
   );
 }
 

@@ -15,6 +15,16 @@
     'Segoe UI', Roboto, sans-serif;
 }
 
+/*
+ * Reading the whole interface in Bengali is not the same as one Bengali dish name inside
+ * an English menu. Hind Siliguri leads when the reader has chosen Bengali, so headings,
+ * buttons and body text share one face instead of alternating between two.
+ */
+html[data-locale='bn'] {
+  --font-sans: var(--font-bengali), var(--font-jakarta), ui-sans-serif, system-ui, -apple-system,
+    'Segoe UI', Roboto, sans-serif;
+}
+
 @layer base {
   html {
     -webkit-text-size-adjust: 100%;

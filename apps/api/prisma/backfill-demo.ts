@@ -22,9 +22,19 @@ const walkingZones = (lat: number, lng: number) => [
   { id: 'further', label: 'A bit further out', fee: t(60), minOrder: t(200), areas: [], center: { lat, lng }, radiusKm: 6 },
 ];
 
+/** What the seed now gives each demo vendor. Keyed by slug so a renamed store is skipped. */
+const DEMO_CUISINES: Record<string, string[]> = {
+  'kacchi-bhai': ['Kacchi', 'Biryani', 'Bangladeshi'],
+  'pizza-shack': ['Pizza', 'Fast Food', 'Burger'],
+  'chai-adda': ['Tea & Coffee', 'Snacks', 'Breakfast'],
+};
+
 async function main() {
   const tenants = await prisma.tenant.findMany({
-    select: { id: true, slug: true, name: true, lat: true, lng: true, pickupEnabled: true, deliveryZones: true },
+    select: {
+      id: true, slug: true, name: true, lat: true, lng: true,
+      pickupEnabled: true, deliveryZones: true, cuisines: true,
+    },
   });
 
   for (const tenant of tenants) {
@@ -66,6 +76,19 @@ async function main() {
           data: { compareAtPrice: Math.round((target.price * 1.25) / 100) * 100 },
         });
       }
+    }
+
+    // 4. Cuisine tags and a delivery-leg estimate, so the marketplace filter chips have
+    //    something to match and the arrival window is not the same number for a tea stall
+    //    three streets away and a kitchen across the city. Only set when still empty:
+    //    these are a vendor's own description of themselves once they have touched them.
+    const tags = DEMO_CUISINES[tenant.slug];
+    if (tags && (tenant.cuisines?.length ?? 0) === 0) {
+      await prisma.tenant.update({
+        where: { id: tenant.id },
+        data: { cuisines: tags, deliveryMinutes: tenant.slug === 'chai-adda' ? 10 : 20 },
+      });
+      console.log(`${tenant.slug}: cuisines ${tags.join(', ')}`);
     }
 
     await backfillHistory(tenant.id);

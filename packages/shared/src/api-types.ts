@@ -64,6 +64,19 @@ export interface PublicTenant {
   promoted?: boolean;
   /** Cheapest zone fee. Kept for the marketplace cards; see deliveryFeeRange for both ends. */
   minDeliveryFee?: number;
+  /**
+   * What kind of food this is, for the marketplace filter chips. Free-form strings drawn
+   * from a suggested list rather than an enum — a new cuisine must not need a migration,
+   * and "Kacchi" is a category here in a way it is nowhere else.
+   */
+  cuisines: string[];
+  /** The vendor's own estimate of the rider leg, in minutes. */
+  deliveryMinutes: number;
+  /**
+   * The quoted arrival window, in minutes. Computed, never stored — it depends on the
+   * distance to the customer, which is not a property of the vendor.
+   */
+  eta: { min: number; max: number };
 }
 
 /**
@@ -217,6 +230,19 @@ export interface OrderDto {
     note: string;
   };
   placedAt: string;
+  /**
+   * When this order should arrive, as real clock times rather than a duration — the
+   * tracker is read minutes after ordering and "35 min" from when is the first question
+   * it raises. Absent once the order is terminal, and on payloads that did not join the
+   * vendor (a vendor's own queue already knows its kitchen times).
+   */
+  etaAt?: { earliest: string; latest: string } | null;
+  /**
+   * Whether the CUSTOMER may still call this off. Decided on the server so the button
+   * appears exactly when the cancel endpoint would say yes — a button that fails on tap
+   * is worse than no button.
+   */
+  canCancel?: boolean;
   events?: { status: OrderStatus; note: string | null; createdAt: string }[];
 }
 

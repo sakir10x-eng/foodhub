@@ -33,6 +33,22 @@ export function assertTransition(from: OrderStatus, to: OrderStatus): void {
 /** Terminal states never change again and free up any held stock/quota. */
 export const TERMINAL_STATUSES: readonly OrderStatus[] = ['DELIVERED', 'CANCELLED', 'REFUNDED'];
 
+/**
+ * What a CUSTOMER may cancel, which is deliberately narrower than what a vendor may.
+ *
+ * The line is the kitchen: once the food is being cooked, the ingredients are spent and
+ * somebody has to pay for them. A vendor can still cancel later (the rider broke down,
+ * the dish ran out) because they are choosing to absorb that cost; a customer cancelling
+ * a half-cooked biryani is handing the vendor the bill for a decision they had no part
+ * in, which is how a marketplace loses restaurants.
+ */
+const customerCancellable: readonly OrderStatus[] = ['PENDING', 'CONFIRMED'];
+export const CUSTOMER_CANCELLABLE_STATUSES = customerCancellable;
+
+export function canCustomerCancel(status: OrderStatus): boolean {
+  return customerCancellable.includes(status);
+}
+
 export function isTerminal(status: OrderStatus): boolean {
   return TERMINAL_STATUSES.includes(status);
 }

@@ -1,6 +1,14 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import { canTransition, OrderDto, OrderStatus, isTerminal } from '@foodhub/shared';
+import {
+  canTransition,
+  canCustomerCancel,
+  estimateEta,
+  etaClock,
+  OrderDto,
+  OrderStatus,
+  isTerminal,
+} from '@foodhub/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantContext } from '../common/tenant-context';
 import { LedgerService } from '../ledger/ledger.service';
@@ -74,7 +82,11 @@ export class OrdersService {
     const order = await TenantContext.runAsPlatform('guest order tracking by code + phone', () =>
       this.prisma.db.order.findUnique({
         where: { code: code.trim().toUpperCase() },
-        include: { ...ORDER_INCLUDE, tenant: { select: { name: true } } },
+        include: {
+          ...ORDER_INCLUDE,
+          // The kitchen times come along so the tracker can quote an arrival window.
+          tenant: { select: { name: true, prepMinutes: true, deliveryMinutes: true, pickupMinutes: true } },
+        },
       }),
     );
     // Requiring the phone as well stops order codes from being a public enumeration.
@@ -85,11 +97,61 @@ export class OrdersService {
     return { ...toDto(order), tenantName: (order as any).tenant?.name };
   }
 
+  /**
+   * A customer calling off their own order.
+   *
+   * Authorised the same way as guest tracking (code + the phone it was placed with), so
+   * it works without an account. The window closes when the kitchen starts cooking: after
+   * that the ingredients are spent, and a customer cancelling then hands the vendor a bill
+   * for a decision they had no part in. The refusal names the restaurant's phone number
+   * rather than saying no — at that point a call is the only thing that can still help.
+   */
+  async cancelByCustomer(code: string, phone: string, reason?: string): Promise<OrderDto> {
+    const order = await TenantContext.runAsPlatform('customer cancels their own order by code + phone', () =>
+      this.prisma.db.order.findUnique({
+        where: { code: code.trim().toUpperCase() },
+        select: {
+          id: true,
+          tenantId: true,
+          status: true,
+          customerPhone: true,
+          tenant: { select: { phone: true, name: true } },
+        },
+      }),
+    );
+
+    const last10 = (v: string) => v.replace(/\D/g, '').slice(-10);
+    if (!order || last10(order.customerPhone) !== last10(phone)) {
+      throw new NotFoundException('No order found with that number and phone');
+    }
+
+    if (isTerminal(order.status)) {
+      throw new BadRequestException(`This order is already ${order.status.toLowerCase()}`);
+    }
+    if (!canCustomerCancel(order.status)) {
+      const line = order.tenant?.phone;
+      throw new BadRequestException(
+        line
+          ? `${order.tenant?.name ?? 'The restaurant'} has already started cooking. Call ${line} and they may still be able to help.`
+          : 'The restaurant has already started cooking this order, so it can no longer be cancelled here.',
+      );
+    }
+
+    return TenantContext.runAsTenant(order.tenantId, () =>
+      this.updateStatus(order.id, 'CANCELLED', 'customer', reason?.trim() || 'Cancelled by the customer'),
+    );
+  }
+
   async listForCustomer(customerId: string) {
     const orders = await TenantContext.runAsPlatform('a customer sees their orders across vendors', () =>
       this.prisma.db.order.findMany({
         where: { customerId },
-        include: { ...ORDER_INCLUDE, tenant: { select: { name: true, slug: true } } },
+        include: {
+          ...ORDER_INCLUDE,
+          tenant: {
+            select: { name: true, slug: true, prepMinutes: true, deliveryMinutes: true, pickupMinutes: true },
+          },
+        },
         orderBy: { placedAt: 'desc' },
         take: 50,
       }),
@@ -269,6 +331,32 @@ function collectedOnline(order: {
   return 0;
 }
 
+/**
+ * The arrival window, when the payload carries enough to work one out.
+ *
+ * Counted from the moment the kitchen accepted the order rather than from when it was
+ * placed: an order that sat unconfirmed for ten minutes is ten minutes later, and a
+ * countdown that started at checkout would already be wrong by the time anyone read it.
+ * Nothing is quoted once the order is delivered, cancelled or refunded — there is no
+ * arrival left to estimate.
+ */
+function etaFields(order: any): { etaAt?: { earliest: string; latest: string } | null } {
+  const tenant = order.tenant;
+  if (!tenant || typeof tenant.prepMinutes !== 'number' || isTerminal(order.status)) return {};
+
+  const from: Date = order.confirmedAt ?? order.placedAt;
+  const { earliest, latest } = etaClock(
+    from,
+    estimateEta({
+      prepMinutes: tenant.prepMinutes,
+      deliveryMinutes: tenant.deliveryMinutes ?? 20,
+      pickupMinutes: tenant.pickupMinutes ?? 15,
+      fulfillment: order.fulfillment ?? 'DELIVERY',
+    }),
+  );
+  return { etaAt: { earliest: earliest.toISOString(), latest: latest.toISOString() } };
+}
+
 export function toDto(order: any): OrderDto {
   return {
     id: order.id,
@@ -301,6 +389,8 @@ export function toDto(order: any): OrderDto {
     })),
     deliveryAddress: order.deliveryAddress,
     placedAt: order.placedAt.toISOString(),
+    ...etaFields(order),
+    canCancel: canCustomerCancel(order.status),
     events: (order.events ?? []).map((e: any) => ({
       status: e.status,
       note: e.note,

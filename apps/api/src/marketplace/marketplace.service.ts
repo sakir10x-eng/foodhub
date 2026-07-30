@@ -1,7 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
-import type { PublicTenant } from '@foodhub/shared';
+import { estimateEta, normaliseCuisine, type PublicTenant, type VendorSort } from '@foodhub/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { CacheService } from '../infra/cache.service';
 import { TenantContext } from '../common/tenant-context';
@@ -18,6 +18,15 @@ export interface NearMeQuery {
   category?: string;
   page?: number;
   pageSize?: number;
+  /** Filter chips. A vendor matches if they carry ANY of the requested cuisines. */
+  cuisines?: string[];
+  /** Hide kitchens that are shut right now. */
+  openNow?: boolean;
+  /** Only vendors with a zone that delivers for nothing. */
+  freeDelivery?: boolean;
+  /** Poisha. Only vendors whose cheapest zone is at or below this. */
+  maxDeliveryFee?: number;
+  sort?: VendorSort;
 }
 
 /**
@@ -41,46 +50,53 @@ export class MarketplaceService {
     const pageSize = Math.min(50, Math.max(1, query.pageSize ?? 20));
     const hasGeo = typeof query.lat === 'number' && typeof query.lng === 'number';
     const radiusKm = query.radiusKm ?? this.config.get<number>('marketplace.nearMeRadiusKm') ?? 8;
+    const cuisines = (query.cuisines ?? []).map(normaliseCuisine).filter(Boolean);
+    const sort: VendorSort = query.sort ?? 'relevance';
 
-    const cacheKey = hasGeo
-      ? `marketplace:near:${query.lat!.toFixed(2)}:${query.lng!.toFixed(2)}:${radiusKm}:${page}:${pageSize}`
-      : `marketplace:vendors:${page}:${pageSize}`;
+    /*
+     * Delivery fees live inside the deliveryZones JSON, and rating/ETA are computed from
+     * several columns — none of the three can be a WHERE or an ORDER BY without either a
+     * generated column or a JSON query that no index can help. So the split is:
+     *
+     *   in SQL      listed / not suspended / open now / cuisine  (indexed, selective)
+     *   in memory   fee filters, and sorting by rating, ETA or fee
+     *
+     * When anything in the second group is asked for we pull a capped candidate set and
+     * paginate here instead. At a few hundred vendors per city that is one indexed read;
+     * the day a city outgrows it, this method is the only thing that changes.
+     */
+    const needsMemoryPass =
+      sort === 'rating' || sort === 'eta' || sort === 'fee' || query.freeDelivery === true || query.maxDeliveryFee !== undefined;
+
+    const cacheKey = [
+      'marketplace:vendors',
+      hasGeo ? `near:${query.lat!.toFixed(2)}:${query.lng!.toFixed(2)}:${radiusKm}` : 'all',
+      cuisines.length ? `c:${cuisines.map((c) => c.toLowerCase()).sort().join(',')}` : '',
+      query.openNow ? 'open' : '',
+      query.freeDelivery ? 'free' : '',
+      query.maxDeliveryFee !== undefined ? `fee<=${query.maxDeliveryFee}` : '',
+      `s:${sort}`,
+      `${page}:${pageSize}`,
+    ].join('|');
 
     return this.cache.wrap(cacheKey, 60, async () =>
       TenantContext.runAsPlatform('marketplace vendor feed spans all listed tenants', async () => {
-        if (hasGeo) return this.nearMe(query.lat!, query.lng!, radiusKm, page, pageSize);
+        const candidates = hasGeo
+          ? await this.nearMe(query.lat!, query.lng!, radiusKm, needsMemoryPass ? 1 : page, needsMemoryPass ? CANDIDATE_CAP : pageSize, { cuisines, openNow: query.openNow })
+          : await this.listAll(needsMemoryPass ? 1 : page, needsMemoryPass ? CANDIDATE_CAP : pageSize, { cuisines, openNow: query.openNow, sort });
 
-        const where: Prisma.TenantWhereInput = { listedOnMarketplace: true, planStatus: { not: 'SUSPENDED' } };
-        const [rows, total] = await Promise.all([
-          this.prisma.db.tenant.findMany({
-            where,
-            include: { logo: { select: IMAGE_SELECT }, cover: { select: IMAGE_SELECT } },
-            /*
-             * Open kitchens first — a closed restaurant at the top of the feed is a dead
-             * click. Paid placement sorts WITHIN that, never above it: selling a slot that
-             * sends customers to a shut kitchen burns the vendor's money and the feed's
-             * credibility at the same time, and the feed is what earns the commission.
-             */
-            orderBy: [
-              { isOpen: 'desc' },
-              { promotedUntil: { sort: 'desc', nulls: 'last' } },
-              { promotedRank: 'desc' },
-              { createdAt: 'desc' },
-            ],
-            skip: (page - 1) * pageSize,
-            take: pageSize,
-          }),
-          this.prisma.db.tenant.count({ where }),
-        ]);
-        const now = new Date();
+        if (!needsMemoryPass) return { ...candidates, page, pageSize };
+
+        let rows = candidates.data;
+        if (query.freeDelivery) rows = rows.filter((v) => (v.deliveryFeeRange?.min ?? 0) === 0);
+        if (query.maxDeliveryFee !== undefined) {
+          rows = rows.filter((v) => (v.deliveryFeeRange?.min ?? 0) <= query.maxDeliveryFee!);
+        }
+        rows = sortVendors(rows, sort);
+
         return {
-          data: rows.map((t) => ({
-            ...this.tenants.toPublic(t),
-            // Labelled, always. An unmarked paid slot is the fastest way to teach
-            // customers that the ranking cannot be trusted.
-            promoted: Boolean(t.promotedUntil && t.promotedUntil > now),
-          })),
-          total,
+          data: rows.slice((page - 1) * pageSize, page * pageSize),
+          total: rows.length,
           page,
           pageSize,
         };
@@ -88,14 +104,75 @@ export class MarketplaceService {
     );
   }
 
+  /** The plain feed: everything listed, house order, paginated in SQL. */
+  private async listAll(
+    page: number,
+    pageSize: number,
+    opts: { cuisines: string[]; openNow?: boolean; sort: VendorSort },
+  ) {
+    const where: Prisma.TenantWhereInput = {
+      listedOnMarketplace: true,
+      planStatus: { not: 'SUSPENDED' },
+      ...(opts.openNow ? { isOpen: true } : {}),
+      ...(opts.cuisines.length ? { cuisines: { hasSome: opts.cuisines } } : {}),
+    };
+    const [rows, total] = await Promise.all([
+      this.prisma.db.tenant.findMany({
+        where,
+        include: { logo: { select: IMAGE_SELECT }, cover: { select: IMAGE_SELECT } },
+        /*
+         * Open kitchens first — a closed restaurant at the top of the feed is a dead
+         * click. Paid placement sorts WITHIN that, never above it: selling a slot that
+         * sends customers to a shut kitchen burns the vendor's money and the feed's
+         * credibility at the same time, and the feed is what earns the commission.
+         */
+        orderBy: [
+          { isOpen: 'desc' },
+          { promotedUntil: { sort: 'desc', nulls: 'last' } },
+          { promotedRank: 'desc' },
+          { createdAt: 'desc' },
+        ],
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      this.prisma.db.tenant.count({ where }),
+    ]);
+    const now = new Date();
+    return {
+      data: rows.map((t) => ({
+        ...this.tenants.toPublic(t),
+        // Labelled, always. An unmarked paid slot is the fastest way to teach
+        // customers that the ranking cannot be trusted.
+        promoted: Boolean(t.promotedUntil && t.promotedUntil > now),
+      })),
+      total,
+      page,
+      pageSize,
+    };
+  }
+
   /**
    * "Near me" without PostGIS: a bounding box narrows the candidate set using the
    * (lat, lng) index, then the haversine expression sorts what survives. Good to a few
    * thousand vendors per city, which is well past where we need to care.
    */
-  private async nearMe(lat: number, lng: number, radiusKm: number, page: number, pageSize: number) {
+  private async nearMe(
+    lat: number,
+    lng: number,
+    radiusKm: number,
+    page: number,
+    pageSize: number,
+    opts: { cuisines: string[]; openNow?: boolean } = { cuisines: [] },
+  ) {
     const latDelta = radiusKm / 111.0;
     const lngDelta = radiusKm / (111.0 * Math.max(0.01, Math.cos((lat * Math.PI) / 180)));
+
+    // Built as fragments rather than interpolated strings so every value stays a bound
+    // parameter — `cuisines` comes straight off the query string.
+    const extra: Prisma.Sql[] = [];
+    if (opts.openNow) extra.push(Prisma.sql`AND "isOpen" = true`);
+    if (opts.cuisines.length) extra.push(Prisma.sql`AND "cuisines" && ${opts.cuisines}::text[]`);
+    const filters = extra.length ? Prisma.join(extra, ' ') : Prisma.empty;
 
     const rows = await this.prisma.unsafeRaw.$queryRaw<{ id: string; distance_km: number }[]>`
       SELECT id,
@@ -112,6 +189,7 @@ export class MarketplaceService {
         AND "lat" IS NOT NULL AND "lng" IS NOT NULL
         AND "lat" BETWEEN ${lat - latDelta} AND ${lat + latDelta}
         AND "lng" BETWEEN ${lng - lngDelta} AND ${lng + lngDelta}
+        ${filters}
       ORDER BY distance_km ASC
       LIMIT ${pageSize} OFFSET ${(page - 1) * pageSize}
     `;
@@ -129,10 +207,47 @@ export class MarketplaceService {
     for (const row of rows) {
       const tenant = byId.get(row.id);
       if (!tenant) continue;
-      data.push({ ...this.tenants.toPublic(tenant), distanceKm: Math.round(row.distance_km * 10) / 10 });
+      const distanceKm = Math.round(row.distance_km * 10) / 10;
+      const base = this.tenants.toPublic(tenant);
+      data.push({
+        ...base,
+        distanceKm,
+        // Now that we know how far the rider has to go, the window can be sharper than
+        // the vendor's distance-free guess.
+        eta: estimateEta({
+          prepMinutes: base.prepMinutes,
+          deliveryMinutes: base.deliveryMinutes,
+          pickupMinutes: base.pickupMinutes,
+          distanceKm,
+        }),
+      });
     }
 
     return { data, total: data.length, page, pageSize };
+  }
+
+  /**
+   * Which cuisine chips to show, and how many restaurants each one leads to.
+   *
+   * Unnested in SQL rather than counted in JS so this stays one indexed read as the
+   * vendor list grows. Cached for five minutes — the set of cuisines in a city changes
+   * when a restaurant signs up, not when one opens for lunch.
+   */
+  async cuisineFacets(): Promise<{ tag: string; count: number }[]> {
+    return this.cache.wrap('marketplace:cuisines', 300, () =>
+      TenantContext.runAsPlatform('marketplace cuisine chips span all listed tenants', async () => {
+        const rows = await this.prisma.unsafeRaw.$queryRaw<{ tag: string; count: bigint }[]>`
+          SELECT tag, COUNT(*) AS count
+          FROM "tenants" t, unnest(t."cuisines") AS tag
+          WHERE t."listedOnMarketplace" = true
+            AND t."planStatus" <> 'SUSPENDED'
+          GROUP BY tag
+          ORDER BY count DESC, tag ASC
+          LIMIT 24
+        `;
+        return rows.map((r) => ({ tag: r.tag, count: Number(r.count) }));
+      }),
+    );
   }
 
   /** A single vendor's marketplace storefront, filtered to items they chose to list. */
@@ -301,6 +416,35 @@ export class MarketplaceService {
       }),
     );
   }
+}
+
+/**
+ * How many vendors a filtered feed will consider before paginating in memory. Well past
+ * every listed restaurant in a city; a feed that hits this cap silently drops the tail,
+ * so it is deliberately generous.
+ */
+const CANDIDATE_CAP = 200;
+
+/**
+ * Ordering a filtered feed.
+ *
+ * A shut kitchen sorts last whatever the customer picked — "sort by rating" does not mean
+ * "show me the best restaurant I cannot order from". Within that, the requested key wins,
+ * and an unrated vendor sorts below every rated one rather than above them at 0.
+ */
+function sortVendors(rows: PublicTenant[], sort: VendorSort): PublicTenant[] {
+  const byKey: Record<Exclude<VendorSort, 'relevance'>, (v: PublicTenant) => number> = {
+    rating: (v) => -(v.rating ?? -1),
+    eta: (v) => v.eta.min,
+    fee: (v) => v.deliveryFeeRange?.min ?? 0,
+    distance: (v) => v.distanceKm ?? Number.MAX_SAFE_INTEGER,
+  };
+  const key = sort === 'relevance' ? null : byKey[sort];
+  return [...rows].sort((a, b) => {
+    if (a.isOpen !== b.isOpen) return a.isOpen ? -1 : 1;
+    if (!key) return 0;
+    return key(a) - key(b);
+  });
 }
 
 interface DishHit {

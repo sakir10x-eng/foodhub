@@ -17,6 +17,8 @@ import { RatePrompt } from '../../../components/RatePrompt';
 import { PushOptIn } from '../../../components/PushOptIn';
 import { PurchaseEvent } from '../../../components/Pixels';
 import { AppShell } from '../../../components/AppShell';
+import { Icon } from '../../../components/Icon';
+import { useI18n, localiseDigits } from '../../../lib/i18n';
 
 /**
  * Live order tracking for customers and guests alike.
@@ -26,6 +28,7 @@ import { AppShell } from '../../../components/AppShell';
  */
 export default function OrderPage({ params }: { params: Promise<{ code: string }> }) {
   const { code } = use(params);
+  const { t, locale } = useI18n();
   const search = useSearchParams();
   const [phone, setPhone] = useState(search.get('phone') ?? '');
   const [order, setOrder] = useState<OrderDto | null>(null);
@@ -92,6 +95,18 @@ export default function OrderPage({ params }: { params: Promise<{ code: string }
     <AppShell className="px-4 pb-16 pt-8">
       <p className="text-sm text-ink-muted">Order</p>
       <h1 className="text-2xl font-extrabold tracking-tight">{order.code}</h1>
+
+      {/* The first question a tracker has to answer is "when". A duration ("35 min")
+          leaves the customer doing arithmetic against a clock they cannot see; a real
+          time does not. */}
+      {!cancelled && order.etaAt && (
+        <p className="mt-3 inline-flex items-center gap-2 rounded-full bg-brand/10 px-3 py-1.5 text-sm font-semibold text-brand">
+          <Icon name="clock" size={14} />
+          {t(order.fulfillment === 'PICKUP' ? 'order.etaPickup' : 'order.eta', {
+            window: `${clockTime(order.etaAt.earliest, locale)}–${clockTime(order.etaAt.latest, locale)}`,
+          })}
+        </p>
+      )}
 
       <div className="card mt-5 p-4">
         {cancelled ? (
@@ -193,7 +208,113 @@ export default function OrderPage({ params }: { params: Promise<{ code: string }
 
       <RatePrompt order={order} phone={phone} />
 
+      {/* Only while the kitchen has not started. The server decides that, not us — see
+          OrderDto.canCancel — so this button and the endpoint cannot disagree. */}
+      {order.canCancel && (
+        <CancelOrder
+          code={order.code}
+          phone={phone}
+          paidOnline={order.total - order.dueOnDelivery}
+          onCancelled={(next) => setOrder(next)}
+        />
+      )}
+
+      {cancelled && order.paymentStatus !== 'REFUNDED' && order.total - order.dueOnDelivery > 0 && (
+        <p className="mt-4 rounded-xl bg-amber-50 px-3 py-2.5 text-sm text-amber-900">
+          {t('order.refundDue', { amount: formatBDT(order.total - order.dueOnDelivery) })}
+        </p>
+      )}
+
       <Link href="/" className="btn-ghost mt-5 w-full">Order something else</Link>
     </AppShell>
+  );
+}
+
+/** Local clock, in the reader's own digits. */
+function clockTime(iso: string, locale: 'en' | 'bn'): string {
+  const time = new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  return localiseDigits(time, locale);
+}
+
+/**
+ * Calling off an order.
+ *
+ * Two taps, never one: a single-tap cancel next to a live order is a mis-tap away from
+ * losing somebody's dinner. The confirmation says plainly that it cannot be undone, and
+ * what happens to money already paid.
+ */
+function CancelOrder({
+  code,
+  phone,
+  paidOnline,
+  onCancelled,
+}: {
+  code: string;
+  phone: string;
+  paidOnline: number;
+  onCancelled: (order: OrderDto) => void;
+}) {
+  const { t } = useI18n();
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await clientApi<OrderDto>('/orders/cancel', {
+        method: 'POST',
+        body: JSON.stringify({ code, phone, reason: reason.trim() || undefined }),
+      });
+      onCancelled(next);
+      setOpen(false);
+    } catch (err) {
+      // The server's message is the useful one — it names the restaurant's phone number
+      // when the kitchen has already started.
+      setError(err instanceof Error ? err.message : t('order.cancel.tooLate'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!open) {
+    return (
+      <button type="button" onClick={() => setOpen(true)} className="mt-5 w-full text-sm font-semibold text-red-700 underline underline-offset-4">
+        {t('order.cancel')}
+      </button>
+    );
+  }
+
+  return (
+    <div className="card mt-5 border-red-200 p-4">
+      <h2 className="font-bold">{t('order.cancel.title')}</h2>
+      <p className="mt-1 text-sm text-ink-muted">{t('order.cancel.body')}</p>
+      {paidOnline > 0 && (
+        <p className="mt-2 text-sm text-amber-900">{t('order.refundDue', { amount: formatBDT(paidOnline) })}</p>
+      )}
+      <input
+        className="field mt-3"
+        placeholder={t('order.cancel.reason')}
+        value={reason}
+        maxLength={300}
+        onChange={(e) => setReason(e.target.value)}
+      />
+      {error && <p role="alert" className="mt-2 text-sm text-red-700">{error}</p>}
+      <div className="mt-3 flex gap-2">
+        <button type="button" disabled={busy} onClick={() => setOpen(false)} className="btn-ghost flex-1">
+          {t('order.cancel.keep')}
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={submit}
+          className="flex-1 rounded-xl bg-red-600 px-4 py-3 text-sm font-semibold text-white disabled:opacity-60"
+        >
+          {t('order.cancel.confirm')}
+        </button>
+      </div>
+    </div>
   );
 }

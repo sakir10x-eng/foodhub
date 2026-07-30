@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from 'next';
 import { Hind_Siliguri, Plus_Jakarta_Sans } from 'next/font/google';
+import { LocaleProvider } from '../lib/i18n';
 import './globals.css';
 
 /**
@@ -68,7 +69,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <link rel="preconnect" href={process.env.NEXT_PUBLIC_API_URL} crossOrigin="" />
         ) : null}
       </head>
-      <body>{children}</body>
+      <body>
+        <LocaleProvider>{children}</LocaleProvider>
+      </body>
     </html>
   );
 }
