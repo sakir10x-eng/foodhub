@@ -1,0 +1,1144 @@
+// FoodHub — dual-channel food commerce platform.
+//
+// Multi-tenancy: single database, shared schema, `tenantId` on every tenant-scoped
+// table. Isolation is enforced at runtime by the Prisma client extension in
+// src/prisma/tenant-guard.ts — a query for a tenant-scoped model that carries no
+// tenant filter is REJECTED, not silently widened.
+//
+// Money: every monetary column is an Int of poisha (1 BDT = 100 poisha). Never Float.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/* ═══════════════════════════════════════════════════════════ tenancy ═══ */
+
+enum Plan {
+  FREE
+  BASIC
+  PRO
+}
+
+enum PlanStatus {
+  ACTIVE
+  PAST_DUE
+  SUSPENDED
+}
+
+model Tenant {
+  id        String   @id @default(uuid()) @db.Uuid
+  slug      String   @unique
+  name      String
+  tagline   String   @default("")
+  brandColor String  @default("#E8533F")
+
+  plan       Plan       @default(FREE)
+  planStatus PlanStatus @default(ACTIVE)
+
+  /// Vendor's OWN gateway credentials for Mode A, AES-256-GCM envelope.
+  /// Never selected by default and never returned to any client.
+  gatewayConfig String?
+
+  /// Vendor's OWN SMS account, same envelope.
+  ///
+  /// Mode A is the vendor's brand on the vendor's domain, so an order text signed
+  /// "FoodHub" is wrong — it confuses the customer and wastes the masking sender ID the
+  /// vendor already pays for. Falls back to the platform account when unset.
+  smsConfig String?
+
+  /// Master switch for Mode B. Per-product overrides live on Product.listedOnMarketplace.
+  listedOnMarketplace Boolean @default(false)
+
+  /// Kitchen open/closed — vendors flip this many times a day.
+  isOpen      Boolean @default(true)
+  prepMinutes Int     @default(25)
+
+  /// DeliveryZone[] — see @foodhub/shared pricing.ts
+  deliveryZones Json @default("[]")
+
+  /// Basis points. MARKETPLACE orders only; never applied to OWN_STORE.
+  commissionRateBps Int @default(1500)
+
+  phone   String @default("")
+  address String @default("")
+  lat     Float?
+  lng     Float?
+
+  /// ── loyalty programme (Phase 4). Per-vendor: the vendor funds the reward.
+  loyaltyEnabled     Boolean @default(false)
+  /// Points earned per ৳100 of goods value.
+  pointsPerHundred   Int     @default(1)
+  /// Poisha a single point is worth at redemption.
+  pointValue         Int     @default(100)
+  minRedeemPoints    Int     @default(50)
+
+  /// ── opening hours
+  /// [{ day: 0-6, open: "10:00", close: "23:00" }] in Asia/Dhaka wall-clock time.
+  /// Empty means the manual isOpen switch is the only rule.
+  openingHours Json @default("[]")
+  /// When true, the schedule flips isOpen automatically. Vendors forget to close at
+  /// night, orders land at 3am, and the next morning is refunds and one-star ratings.
+  autoOpenClose Boolean @default(false)
+
+  /// ── fulfilment
+  /// Collection from the counter. Off by default: a vendor with no shopfront (a cloud
+  /// kitchen) would otherwise have customers turning up at a kitchen door.
+  pickupEnabled Boolean @default(false)
+  /// Minutes until a pickup order is ready. Lower than delivery — no rider leg.
+  pickupMinutes Int     @default(15)
+
+  /// ── scheduling
+  /// Customers picking a delivery time. Ramadan iftar and office lunch are the two cases
+  /// that matter here, and both are the whole day's volume arriving in one hour.
+  schedulingEnabled Boolean @default(false)
+  /// How far ahead an order may be placed.
+  schedulingMaxDays Int     @default(3)
+
+  /// ── ratings, denormalised
+  /// Kept as a running sum + count rather than aggregated on read: the storefront header
+  /// shows this on every visit and it is baked into the cached menu payload, so it must
+  /// not cost a scan of the reviews table.
+  ratingSum   Int @default(0)
+  ratingCount Int @default(0)
+
+  /// ── payment policy
+  /// Fake cash-on-delivery orders are a real cost in BD food delivery: the kitchen
+  /// cooks, the rider rides, nobody answers the door. These let a vendor require money
+  /// up front instead of absorbing that.
+  codEnabled       Boolean @default(true)
+  /// Share of the order that must be paid before the kitchen starts. 0 = none, 50 =
+  /// half, 100 = full prepayment.
+  advancePercent   Int     @default(0)
+  /// Only demand an advance above this subtotal (poisha). 0 = always.
+  advanceThreshold Int     @default(0)
+
+  /// ── paid placement (platform revenue)
+  /// Paid position at the top of the marketplace feed. Highest-margin revenue in the
+  /// business: no food is cooked and no rider rides, so it is nearly all margin.
+  promotedUntil DateTime?
+  /// Higher wins among promoted vendors. Ours to set, not the vendor's.
+  promotedRank  Int      @default(0)
+
+  /// ── marketing
+  /// Ad-platform pixel IDs, so a vendor's Facebook campaign can optimise on real
+  /// purchases instead of guesses. Stored per vendor: these are THEIR ad accounts.
+  metaPixelId   String @default("")
+  tiktokPixelId String @default("")
+  ga4MeasurementId String @default("")
+
+  /// ── referrals
+  /// Credit given to each side when a referred customer's first order is delivered.
+  referralEnabled     Boolean @default(false)
+  referrerReward      Int     @default(5000)
+  refereeReward       Int     @default(5000)
+  /// The referred customer must spend at least this before either side is paid.
+  referralMinSpend    Int     @default(30000)
+
+  /// ── AI order assistant (Phase 4)
+  aiAssistantEnabled Boolean @default(false)
+  /// Extra vendor-specific guidance appended to the assistant's system prompt.
+  aiPersona          String  @default("")
+
+  logoId  String? @db.Uuid
+  coverId String? @db.Uuid
+  logo    Image?  @relation("TenantLogo", fields: [logoId], references: [id], onDelete: SetNull)
+  cover   Image?  @relation("TenantCover", fields: [coverId], references: [id], onDelete: SetNull)
+
+  /// Bumped on any menu write; used as the edge-cache key so menus can be cached hard.
+  menuVersion Int @default(1)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  domains       Domain[]
+  users         User[]
+  categories    Category[]
+  products      Product[]
+  orders        Order[]
+  ledgerEntries LedgerEntry[]
+  settlements   Settlement[]
+  subscription  Subscription?
+  invoices      Invoice[]
+  coupons       Coupon[]
+  images        Image[]       @relation("TenantImages")
+  loyaltyAccounts     LoyaltyAccount[]
+  loyaltyTransactions LoyaltyTransaction[]
+  productAffinities   ProductAffinity[]
+  conversations       Conversation[]
+  reviews             Review[]
+  productVotes        ProductVote[]
+  modifierGroups      ModifierGroup[]
+  modifierOptions     ModifierOption[]
+  combos              Combo[]
+  pushSubscriptions   PushSubscription[]
+  abandonedCarts      AbandonedCart[]
+  recurringOrders     Subscription_Order[]
+  referrals           Referral[]
+  couponFunding       CouponFunding[]
+  riders              Rider[]
+
+  @@index([listedOnMarketplace, isOpen])
+  @@map("tenants")
+}
+
+/// Volume-based commission. A vendor doing ৳5 lakh a month is worth more at 12% than a
+/// vendor doing ৳50,000 at 15%, and having the tiers written down is what turns a
+/// negotiation into a rate card.
+model CommissionTier {
+  id          String @id @default(uuid()) @db.Uuid
+  name        String
+  /// Monthly marketplace GMV, in poisha, at which this tier starts.
+  minMonthlyGmv Int
+  rateBps       Int
+  sortOrder     Int   @default(0)
+
+  @@map("commission_tiers")
+}
+
+enum SslStatus {
+  PENDING
+  ACTIVE
+  FAILED
+}
+
+model Domain {
+  id        String    @id @default(uuid()) @db.Uuid
+  tenantId  String    @db.Uuid
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  hostname  String    @unique
+  sslStatus SslStatus @default(PENDING)
+  isPrimary Boolean   @default(false)
+  /// Set once we have seen a request arrive on this hostname (proves DNS is pointed at us).
+  verifiedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([tenantId])
+  @@map("domains")
+}
+
+/* ══════════════════════════════════════════════════════════════ auth ═══ */
+
+enum Role {
+  PLATFORM_ADMIN
+  VENDOR_OWNER
+  VENDOR_STAFF
+  CUSTOMER
+}
+
+model User {
+  id       String  @id @default(uuid()) @db.Uuid
+  /// null = platform-level: PLATFORM_ADMIN or a marketplace CUSTOMER.
+  tenantId String? @db.Uuid
+  tenant   Tenant? @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  role         Role    @default(CUSTOMER)
+  name         String  @default("")
+  email        String  @unique
+  phone        String?
+  passwordHash String
+
+  isActive  Boolean  @default(true)
+  lastLoginAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  refreshTokens RefreshToken[]
+  orders        Order[]
+  addresses     SavedAddress[]
+
+  @@index([tenantId, role])
+  @@index([phone])
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @db.Uuid
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// SHA-256 of the token. The raw token is only ever in the client's hands.
+  tokenHash String   @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+/// Saved addresses are what make checkout ≤3 taps.
+model SavedAddress {
+  id        String  @id @default(uuid()) @db.Uuid
+  userId    String  @db.Uuid
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label     String  @default("Home")
+  name      String
+  phone     String
+  addressLine String
+  area      String  @default("")
+  city      String  @default("Dhaka")
+  note      String  @default("")
+  isDefault Boolean @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@map("saved_addresses")
+}
+
+/* ═══════════════════════════════════════════════════════════ catalog ═══ */
+
+model Image {
+  id       String  @id @default(uuid()) @db.Uuid
+  tenantId String? @db.Uuid
+  tenant   Tenant? @relation("TenantImages", fields: [tenantId], references: [id], onDelete: Cascade)
+
+  /// Storage key without extension; the pipeline writes -{w}.webp and -{w}.avif variants.
+  key      String
+  width    Int
+  height   Int
+  /// Tiny base64 LQIP so cards never flash empty.
+  blurhash String?
+  sizeBytes Int    @default(0)
+  /// AVIF derivatives are encoded off the request path; only emit the <source> once true,
+  /// because a browser will NOT fall back if a listed <source> 404s.
+  hasAvif   Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  products     Product[]
+  combos       Combo[]
+  tenantLogos  Tenant[]  @relation("TenantLogo")
+  tenantCovers Tenant[]  @relation("TenantCover")
+
+  @@index([tenantId])
+  @@map("images")
+}
+
+model Category {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @db.Uuid
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name      String
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  products Product[]
+
+  @@index([tenantId, sortOrder])
+  @@map("categories")
+}
+
+model Product {
+  id         String    @id @default(uuid()) @db.Uuid
+  tenantId   String    @db.Uuid
+  tenant     Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  categoryId String?   @db.Uuid
+  category   Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  name        String
+  description String @default("")
+  /// Poisha.
+  price       Int
+  /// Poisha. What this used to cost, shown struck through beside the price.
+  /// Only meaningful above `price`; the API refuses anything else rather than let a
+  /// storefront advertise a saving that does not exist.
+  compareAtPrice Int?
+
+  /// Per-dish approval, denormalised from `product_votes` inside the same transaction as
+  /// the vote. Read on every menu render; the rows exist so the number can be audited.
+  thumbsUp    Int @default(0)
+  thumbsTotal Int @default(0)
+
+  imageId String? @db.Uuid
+  image   Image?  @relation(fields: [imageId], references: [id], onDelete: SetNull)
+
+  /// Real-time availability — the one field that must bypass the menu cache.
+  isAvailable         Boolean @default(true)
+  /// Set when an item is marked "sold out for today". A nightly job clears it, because the
+  /// alternative is a vendor forgetting and the dish quietly missing for a month.
+  soldOutUntil        DateTime?
+  /// Per-item override of Tenant.listedOnMarketplace. Both must be true to appear.
+  listedOnMarketplace Boolean @default(true)
+  sortOrder           Int     @default(0)
+
+  isArchived Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  orderItems OrderItem[]
+  votes      ProductVote[]
+  modifierGroups ModifierGroup[]
+  comboItems     ComboItem[]
+
+  @@index([tenantId, categoryId, sortOrder])
+  @@index([tenantId, isArchived])
+  @@index([listedOnMarketplace, isAvailable])
+  @@map("products")
+}
+
+model Coupon {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @db.Uuid
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  code         String
+  /// Either percentOff (basis points) or amountOff (poisha) — not both.
+  percentOffBps Int?
+  amountOff     Int?
+  minSubtotal   Int      @default(0)
+  maxDiscount   Int?
+  usageLimit    Int?
+  usedCount     Int      @default(0)
+  expiresAt     DateTime?
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+
+  funding CouponFunding?
+
+  @@unique([tenantId, code])
+  @@map("coupons")
+}
+
+/// A choice attached to a product: "Size", "Extras", "Spice level".
+///
+/// This is the single biggest lever on average order value in food — a menu of flat-priced
+/// items cannot upsell. Groups belong to one product rather than being shared, because a
+/// shared "Size" group would mean small/large priced identically across every dish.
+model ModifierGroup {
+  id        String  @id @default(uuid()) @db.Uuid
+  tenantId  String  @db.Uuid
+  tenant    Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  productId String  @db.Uuid
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  name String
+  /// How many options the customer must pick. 1 with maxSelect 1 = a required radio group
+  /// (size); 0 = optional (extras).
+  minSelect Int @default(0)
+  maxSelect Int @default(1)
+  sortOrder Int @default(0)
+
+  options ModifierOption[]
+
+  @@index([productId])
+  @@map("modifier_groups")
+}
+
+model ModifierOption {
+  id       String        @id @default(uuid()) @db.Uuid
+  tenantId String        @db.Uuid
+  tenant   Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  groupId  String        @db.Uuid
+  group    ModifierGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  name String
+  /// Added to the line price, in poisha. May be 0 ("no ice") and is never negative —
+  /// a discount belongs in a coupon, not hidden inside a topping.
+  priceDelta  Int     @default(0)
+  isAvailable Boolean @default(true)
+  sortOrder   Int     @default(0)
+
+  @@index([groupId])
+  @@map("modifier_options")
+}
+
+/// A fixed bundle sold at one price: "2 kacchi + 2 borhani = ৳980".
+///
+/// Priced as a whole rather than as a discount off the parts, so the vendor controls the
+/// margin directly instead of reasoning about percentages.
+model Combo {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @db.Uuid
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  name        String
+  description String  @default("")
+  /// Poisha. What the customer pays for the whole bundle.
+  price       Int
+  imageId     String? @db.Uuid
+  image       Image?  @relation(fields: [imageId], references: [id], onDelete: SetNull)
+
+  isAvailable         Boolean @default(true)
+  listedOnMarketplace Boolean @default(true)
+  sortOrder           Int     @default(0)
+
+  items     ComboItem[]
+  createdAt DateTime    @default(now())
+
+  @@index([tenantId, isAvailable])
+  @@map("combos")
+}
+
+model ComboItem {
+  id        String  @id @default(uuid()) @db.Uuid
+  comboId   String  @db.Uuid
+  combo     Combo   @relation(fields: [comboId], references: [id], onDelete: Cascade)
+  productId String  @db.Uuid
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  qty       Int     @default(1)
+
+  @@index([comboId])
+  @@index([productId])
+  @@map("combo_items")
+}
+
+/// Somebody who carries the food.
+///
+/// Riders belong to the vendor, not the platform: v1 is self-delivery, and a rider here is
+/// a phone number the kitchen can point at an order and a name the customer can be told.
+model Rider {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @db.Uuid
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  name     String
+  phone    String
+  isActive Boolean @default(true)
+  /// Rotated per rider so a delivery link cannot be guessed from an order code.
+  token    String  @unique
+
+  orders    Order[]
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, isActive])
+  @@map("riders")
+}
+
+/// A share of a discount that WE fund.
+///
+/// Co-funding is what lets a vendor run a discount big enough to matter: the platform
+/// carries half, the vendor carries half, and the ledger keeps the two apart so neither
+/// side is quietly paying for the other's marketing.
+model CouponFunding {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @db.Uuid
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  couponId String @unique @db.Uuid
+  coupon   Coupon @relation(fields: [couponId], references: [id], onDelete: Cascade)
+
+  /// Basis points of each discount that the PLATFORM absorbs. 5000 = half.
+  platformShareBps Int @default(0)
+  /// Stop funding once we have spent this much, so a viral code cannot drain the budget.
+  budget       Int @default(0)
+  budgetSpent  Int @default(0)
+
+  createdAt DateTime @default(now())
+
+  @@map("coupon_funding")
+}
+
+/// One customer inviting another.
+///
+/// The reward is only paid when the invited customer's first order is DELIVERED — not
+/// when they sign up, and not when they place. Paying on signup is an invitation to farm
+/// codes with throwaway numbers; paying on delivery means the platform has already earned
+/// its margin on a real order before it gives anything away.
+model Referral {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @db.Uuid
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  /// Short human-shareable code owned by the referring customer.
+  code          String
+  referrerPhone String
+  /// Null until somebody actually uses the code.
+  refereePhone  String?
+  orderId       String? @db.Uuid
+
+  /// Set once both sides have been credited, so a replay pays nobody twice.
+  rewardedAt DateTime?
+  createdAt  DateTime @default(now())
+
+  @@unique([tenantId, code])
+  @@index([tenantId, referrerPhone])
+  @@index([refereePhone])
+  @@map("referrals")
+}
+
+/// A browser or device that agreed to receive push notifications.
+///
+/// Push is the one retention channel with no per-message cost, which makes it the only one
+/// that can carry "your rider is 5 minutes away" without a budget conversation.
+model PushSubscription {
+  id       String  @id @default(uuid()) @db.Uuid
+  tenantId String? @db.Uuid
+  tenant   Tenant? @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  /// The endpoint URL is globally unique per browser install — the natural identity here.
+  endpoint String @unique
+  p256dh   String
+  auth     String
+  /// Ties a subscription to a person so an order update reaches the right device.
+  phone    String?
+  userId   String? @db.Uuid
+
+  createdAt DateTime  @default(now())
+  lastSeenAt DateTime @default(now())
+  /// Set when the push service reports the subscription is dead, so we stop trying.
+  failedAt  DateTime?
+
+  @@index([tenantId])
+  @@index([phone])
+  @@map("push_subscriptions")
+}
+
+/// A cart the customer built and walked away from.
+///
+/// Deliberately server-side, unlike the live cart: recovering an abandoned basket means
+/// reaching someone who has already closed the tab, which is impossible from localStorage.
+/// Only ever written once a phone number has been given — no number, no row.
+model AbandonedCart {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @db.Uuid
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  phone String
+  /// [{ productId, name, qty, price }] — a snapshot, not a live reference.
+  items Json
+  subtotal Int @default(0)
+
+  /// Set when the reminder went out, so it goes out at most once.
+  remindedAt DateTime?
+  /// Set when this basket turned into a real order, which is the metric that matters.
+  recoveredAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, phone])
+  @@index([tenantId, remindedAt])
+  @@map("abandoned_carts")
+}
+
+/// A standing order: the same basket, on a schedule.
+///
+/// Small in volume, enormous in retention — a customer on a daily chai subscription has
+/// stopped choosing a restaurant every morning.
+model Subscription_Order {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @db.Uuid
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  phone   String
+  /// [{ productId, qty, optionIds }] — re-priced from the live menu on every run, so a
+  /// price change reaches the customer instead of being frozen at signup.
+  items   Json
+  address Json
+
+  /// 0=Sunday … 6=Saturday. Empty means every day.
+  daysOfWeek Int[]  @default([])
+  /// Local time of day, "08:00". Stored as text because it is a wall-clock time in
+  /// Asia/Dhaka, not an instant.
+  timeOfDay  String
+
+  isActive  Boolean   @default(true)
+  lastRunAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([tenantId, isActive])
+  @@map("recurring_orders")
+}
+
+/// A customer's rating of one delivered order.
+///
+/// Anchored to the order, not the customer: `orderId` is unique, so a rating is something
+/// you earn by actually feeding someone once. That is the whole anti-fraud design — there
+/// is no way to post a review without an order code and the phone that placed it.
+model Review {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @db.Uuid
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  orderId String @unique @db.Uuid
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  /// 1–5. Validated at the API edge; the column is an Int so a 0 or 6 would be a bug.
+  rating  Int
+  comment String @default("")
+  /// Snapshot of the name on the order, so a later profile edit cannot rewrite history.
+  authorName String @default("")
+
+  /// The vendor's public answer. A calm reply under a two-star review does more for a
+  /// new customer than the two stars do against them.
+  reply     String?
+  repliedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+  @@map("reviews")
+}
+
+/// A thumbs up or down on ONE dish from ONE delivered order.
+///
+/// Separate from Review on purpose. A five-star order tells a vendor the evening went
+/// well; it does not tell them the borhani was flat. The unique key is the order line, so
+/// the count under a dish is exactly "people who bought this and said something" — a
+/// number a competitor cannot move and a vendor cannot inflate without cooking first.
+model ProductVote {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @db.Uuid
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  orderId String @db.Uuid
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  productId String  @db.Uuid
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  /// true = 👍. Stored rather than derived so a vote can be corrected, not just added to.
+  up Boolean
+
+  createdAt DateTime @default(now())
+
+  /// One verdict per dish per order. This is the whole anti-stuffing model.
+  @@unique([orderId, productId])
+  @@index([tenantId, productId])
+  @@map("product_votes")
+}
+
+/* ════════════════════════════════════════════════════════════ orders ═══ */
+
+enum Channel {
+  OWN_STORE
+  MARKETPLACE
+}
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  PREPARING
+  READY
+  ON_THE_WAY
+  DELIVERED
+  CANCELLED
+  REFUNDED
+}
+
+enum Fulfillment {
+  DELIVERY
+  /// Customer collects from the counter. No rider, and therefore no delivery fee.
+  PICKUP
+}
+
+enum PaymentStatus {
+  UNPAID
+  /// An advance was taken online; the rider still collects the remainder.
+  PARTIALLY_PAID
+  PAID
+  REFUNDED
+}
+
+model Order {
+  id       String @id @default(uuid()) @db.Uuid
+  /// The fulfilling vendor. Marketplace orders are written back to the owning tenant.
+  tenantId String @db.Uuid
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+
+  /// Human-facing order number, derived from `seq`.
+  code String @unique
+  seq  Int    @unique @default(autoincrement())
+
+  /// THE key discriminator. Decides gateway, commission and settlement behaviour.
+  channel Channel
+
+  /// Null for guest checkout — the address JSON still carries name + phone.
+  customerId String? @db.Uuid
+  customer   User?   @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  /// Denormalised for guest order lookup by phone.
+  customerPhone String
+
+  status        OrderStatus   @default(PENDING)
+  paymentStatus PaymentStatus @default(UNPAID)
+  paymentMethod String        @default("COD")
+  paymentRef    String?
+
+  subtotal    Int
+  deliveryFee Int
+  discount    Int @default(0)
+  total       Int
+  /// MARKETPLACE only; always 0 for OWN_STORE.
+  commissionAmount Int @default(0)
+  /// Gateway fee we absorb on marketplace orders.
+  gatewayFee       Int @default(0)
+
+  couponCode      String?
+  deliveryAddress Json
+
+  /// Who is carrying it. Null until the kitchen assigns someone.
+  riderId String? @db.Uuid
+  rider   Rider?  @relation(fields: [riderId], references: [id], onDelete: SetNull)
+
+  /// When the customer asked for it. Null means as soon as possible.
+  ///
+  /// Held in the PENDING queue until close to the time rather than being confirmed on
+  /// arrival — a kitchen that starts cooking an 8pm order at 2pm delivers cold food.
+  scheduledFor DateTime?
+
+  /// Delivery or collection. PICKUP orders carry a zero delivery fee by construction —
+  /// see checkout.service.ts, which never resolves a zone for them.
+  fulfillment Fulfillment @default(DELIVERY)
+
+  /// Payment split. `advanceAmount` was charged online before cooking started;
+  /// `dueOnDelivery` is what the rider collects. They always sum to `total`.
+  advanceAmount  Int @default(0)
+  dueOnDelivery  Int @default(0)
+
+  /// Loyalty (Phase 4). Points are awarded on DELIVERED, never at checkout —
+  /// otherwise a cancelled order mints free points.
+  pointsRedeemed Int @default(0)
+  pointsEarned   Int @default(0)
+  /// Store credit spent on this order, in poisha. Part of `discount`.
+  walletUsed     Int @default(0)
+
+  placedAt    DateTime  @default(now())
+  confirmedAt DateTime?
+  deliveredAt DateTime?
+  cancelledAt DateTime?
+  cancelReason String?
+
+  /// Guards against double-settlement if a DELIVERED webhook is replayed.
+  settledAt     DateTime?
+  settlementId  String?     @db.Uuid
+  settlement    Settlement? @relation(fields: [settlementId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items         OrderItem[]
+  events        OrderEvent[]
+  review        Review?
+  productVotes  ProductVote[]
+  ledgerEntries LedgerEntry[]
+  payments      Payment[]
+
+  @@index([tenantId, status])
+  @@index([tenantId, placedAt])
+  @@index([tenantId, channel, placedAt])
+  @@index([customerId, placedAt])
+  @@index([customerPhone])
+  @@index([channel, status])
+  @@map("orders")
+}
+
+model OrderItem {
+  id      String @id @default(uuid()) @db.Uuid
+  orderId String @db.Uuid
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  /// Kept for analytics; nulled if the product is later deleted. History lives in the snapshots.
+  productId String?  @db.Uuid
+  product   Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  nameSnapshot  String
+  priceSnapshot Int
+  qty           Int
+
+  /// The options the customer picked, captured at order time:
+  /// [{ groupName, optionName, priceDelta }]. Snapshotted like name and price, because a
+  /// vendor renaming "Extra cheese" must not rewrite what a past customer ordered.
+  modifiers Json @default("[]")
+  /// Set when this line came from a bundle rather than a single item.
+  comboName String?
+
+  @@index([orderId])
+  /// Best-sellers analytics joins order_items back to orders on the product side.
+  @@index([productId])
+  @@map("order_items")
+}
+
+model OrderEvent {
+  id      String      @id @default(uuid()) @db.Uuid
+  orderId String      @db.Uuid
+  order   Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  status  OrderStatus
+  note    String?
+  /// Who moved it: user id, "system", or "webhook:sslcommerz".
+  actor     String   @default("system")
+  createdAt DateTime @default(now())
+
+  @@index([orderId, createdAt])
+  @@map("order_events")
+}
+
+model Payment {
+  id      String @id @default(uuid()) @db.Uuid
+  orderId String @db.Uuid
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  provider String
+  /// Which side's merchant account this ran through.
+  channel  Channel
+  amount   Int
+  status   String @default("INITIATED")
+  gatewayRef String?
+  /// The gateway's own handle for a payment that has been created but not yet completed.
+  /// bKash needs this on the way back: its callback carries only a paymentID, and the
+  /// execute call that actually takes the money is keyed on it.
+  providerRef String?
+  /// Raw gateway callback, kept for dispute resolution.
+  payload  Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([orderId])
+  @@index([gatewayRef])
+  @@index([providerRef])
+  @@map("payments")
+}
+
+/* ═════════════════════════════════════════════════════ money movement ═══ */
+
+enum LedgerType {
+  CUSTOMER_PAYMENT
+  COMMISSION
+  VENDOR_PAYABLE
+  SETTLEMENT
+  REFUND
+}
+
+/// Double-entry-style journal for MARKETPLACE money only.
+/// OWN_STORE orders never produce a ledger row — we never touch that money.
+model LedgerEntry {
+  id       String  @id @default(uuid()) @db.Uuid
+  /// Monotonic write order. `createdAt` CANNOT be used to find the latest entry:
+  /// Postgres now() is transaction-scoped, so every row written in one transaction
+  /// shares a timestamp and "ORDER BY createdAt DESC" picks among them arbitrarily —
+  /// which silently corrupts the running balance.
+  seq      Int     @unique @default(autoincrement())
+  tenantId String  @db.Uuid
+  tenant   Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  orderId  String? @db.Uuid
+  order    Order?  @relation(fields: [orderId], references: [id], onDelete: SetNull)
+
+  type   LedgerType
+  /// Signed poisha.
+  amount Int
+  /// Running vendor balance after this entry, for O(1) statements.
+  balanceAfter Int
+  memo         String @default("")
+
+  settlementId String?     @db.Uuid
+  settlement   Settlement? @relation(fields: [settlementId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, seq])
+  @@index([tenantId, createdAt])
+  @@index([tenantId, type, settlementId])
+  @@index([orderId])
+  @@map("ledger_entries")
+}
+
+enum SettlementStatus {
+  PENDING
+  PAID
+}
+
+model Settlement {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @db.Uuid
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  periodStart DateTime
+  periodEnd   DateTime
+  gross       Int
+  commission  Int
+  gatewayFees Int @default(0)
+  netPayable  Int
+
+  status SettlementStatus @default(PENDING)
+  paidAt DateTime?
+  payoutRef String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  orders        Order[]
+  ledgerEntries LedgerEntry[]
+
+  @@index([tenantId, periodEnd])
+  @@map("settlements")
+}
+
+/* ══════════════════════════════════════════ loyalty + wallet (Ph 4) ═══ */
+
+/// One per (vendor, customer phone). Keyed by phone rather than userId so guests —
+/// the majority of BD food orders — earn and redeem exactly like signed-in customers.
+model LoyaltyAccount {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @db.Uuid
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  phone      String
+  customerId String? @db.Uuid
+  name       String  @default("")
+
+  pointsBalance  Int @default(0)
+  lifetimePoints Int @default(0)
+  /// Store credit in poisha — refunds and goodwill, spendable at checkout.
+  walletBalance  Int @default(0)
+
+  tier      String   @default("BRONZE")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  transactions LoyaltyTransaction[]
+
+  @@unique([tenantId, phone])
+  @@index([tenantId, pointsBalance])
+  @@map("loyalty_accounts")
+}
+
+model LoyaltyTransaction {
+  id        String         @id @default(uuid()) @db.Uuid
+  tenantId  String         @db.Uuid
+  tenant    Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  accountId String         @db.Uuid
+  account   LoyaltyAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  orderId   String?        @db.Uuid
+
+  /// EARN / REDEEM move points; CREDIT / DEBIT move wallet money.
+  type   String
+  points Int @default(0)
+  amount Int @default(0)
+  memo   String @default("")
+
+  /// Monotonic write order — same reason as LedgerEntry.seq.
+  seq       Int      @unique @default(autoincrement())
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, accountId, seq])
+  @@index([orderId])
+  @@map("loyalty_transactions")
+}
+
+/* ══════════════════════════════════════ recommendations (Phase 4) ═══ */
+
+/// "Customers who ordered X also ordered Y", counted from delivered orders.
+/// Refreshed by a nightly job; cheap to read, so recommendations cost one indexed query.
+model ProductAffinity {
+  id        String @id @default(uuid()) @db.Uuid
+  tenantId  String @db.Uuid
+  tenant    Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  productId String @db.Uuid
+  relatedId String @db.Uuid
+
+  /// Number of orders containing both items.
+  coCount   Int      @default(0)
+  /// coCount normalised by how often the anchor sells, so a popular item
+  /// doesn't get recommended alongside everything.
+  score     Float    @default(0)
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, productId, relatedId])
+  @@index([tenantId, productId, score])
+  @@map("product_affinities")
+}
+
+/* ═══════════════════════════════════════ AI assistant (Phase 4) ═══ */
+
+model Conversation {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @db.Uuid
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  /// WEB | WHATSAPP | MESSENGER
+  channel       String @default("WEB")
+  customerPhone String @default("")
+  /// Stable per-channel identity (wa id, psid, or a browser session id).
+  externalId    String
+
+  /// Cart the assistant is building, as [{productId, qty}].
+  draftCart Json    @default("[]")
+  orderId   String? @db.Uuid
+  status    String  @default("OPEN")
+
+  lastMessageAt DateTime @default(now())
+  createdAt     DateTime @default(now())
+
+  messages ConversationMessage[]
+
+  @@unique([tenantId, channel, externalId])
+  @@index([tenantId, lastMessageAt])
+  @@map("conversations")
+}
+
+model ConversationMessage {
+  id             String       @id @default(uuid()) @db.Uuid
+  conversationId String       @db.Uuid
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  /// user | assistant
+  role String
+  text String
+  /// Tool calls the assistant made on this turn, for auditing what it did.
+  toolCalls Json?
+  /// Tokens billed for this turn, so the feature's cost is attributable per vendor.
+  inputTokens  Int @default(0)
+  outputTokens Int @default(0)
+  cachedTokens Int @default(0)
+
+  seq       Int      @unique @default(autoincrement())
+  createdAt DateTime @default(now())
+
+  @@index([conversationId, seq])
+  @@map("conversation_messages")
+}
+
+/* ══════════════════════════════════════════════ SaaS billing (Mode A) ═══ */
+
+model Subscription {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @unique @db.Uuid
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  plan     Plan   @default(FREE)
+  /// Poisha per interval.
+  amount   Int    @default(0)
+  interval String @default("MONTHLY")
+
+  currentPeriodStart DateTime @default(now())
+  nextBillingAt      DateTime
+  /// Grace window before we suspend a PAST_DUE tenant.
+  graceDays          Int      @default(7)
+  status             String   @default("ACTIVE")
+  cancelledAt        DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("subscriptions")
+}
+
+enum InvoiceStatus {
+  PAID
+  UNPAID
+  OVERDUE
+}
+
+model Invoice {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @db.Uuid
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  number      String        @unique
+  seq         Int           @unique @default(autoincrement())
+  amount      Int
+  status      InvoiceStatus @default(UNPAID)
+  periodStart DateTime
+  periodEnd   DateTime
+  dueAt       DateTime
+  paidAt      DateTime?
+  paymentRef  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId, status])
+  @@map("invoices")
+}

@@ -1,0 +1,20 @@
+{
+  "name": "FoodHub",
+  "short_name": "FoodHub",
+  "description": "Order food from restaurants near you.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#ffffff",
+  "theme_color": "#E8533F",
+  "categories": ["food", "shopping"],
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Track my order", "url": "/order", "description": "Check the status of a recent order" }
+  ]
+}

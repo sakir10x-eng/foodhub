@@ -1,0 +1,84 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --brand: 232 83 63;
+  --brand-soft: 253 240 237;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    /* Never let a wide element make the whole page scroll sideways on a phone. */
+    overflow-x: hidden;
+  }
+  body {
+    @apply bg-surface text-ink antialiased;
+    font-family: var(--font-sans);
+  }
+  /* Tap targets stay >= 44px; iOS refuses to zoom inputs at >= 16px. */
+  button,
+  a,
+  input,
+  select,
+  textarea {
+    font-size: max(16px, 1em);
+  }
+  ::selection {
+    background: rgb(var(--brand) / 0.18);
+  }
+}
+
+@layer components {
+  /* Grey placeholder blocks, never spinners — an empty screen with a spinner reads
+     as "broken", a skeleton reads as "nearly there". */
+  .skeleton {
+    @apply relative overflow-hidden rounded-lg bg-surface-sunk;
+  }
+  .skeleton::after {
+    @apply absolute inset-0 -translate-x-full animate-shimmer;
+    content: '';
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.65), transparent);
+  }
+
+  .btn {
+    @apply inline-flex min-h-[48px] items-center justify-center gap-2 rounded-xl px-5 text-[15px] font-semibold
+           transition active:scale-[.98] disabled:pointer-events-none disabled:opacity-45;
+  }
+  .btn-brand {
+    @apply btn bg-brand text-white shadow-card;
+  }
+  .btn-ghost {
+    @apply btn border border-surface-line bg-white text-ink;
+  }
+
+  .field {
+    @apply w-full rounded-xl border border-surface-line bg-white px-4 py-3 text-[15px] outline-none
+           placeholder:text-ink-faint focus:border-brand focus:ring-4 focus:ring-brand/10;
+  }
+
+  .card {
+    @apply rounded-2xl border border-surface-line bg-white shadow-card;
+  }
+
+  /* Hide scrollbars on the horizontal category rail without killing scrollability. */
+  .no-bar {
+    scrollbar-width: none;
+  }
+  .no-bar::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* Respect the user's motion preference — vestibular disorders are not an edge case. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

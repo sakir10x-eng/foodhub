@@ -1,0 +1,139 @@
+# FoodHub production stack.
+#
+# Designed to sit behind an EXISTING Traefik on a shared host: no host ports are
+# published, routing is entirely by container label, and every dependency (Postgres,
+# Redis) is private to this stack. Nothing here can collide with another project.
+#
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+
+name: foodhub
+
+x-app: &app
+  image: foodhub:latest
+  restart: unless-stopped
+  env_file: [.env.prod]
+  depends_on:
+    postgres: { condition: service_healthy }
+    redis: { condition: service_healthy }
+  networks: [foodhub]
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: foodhub
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: foodhub
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Deliberately no host port: this database is reachable only from this stack.
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U foodhub -d foodhub']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [foodhub]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Orders in flight are not disposable — persist the queue across restarts.
+    command: redis-server --appendonly yes --maxmemory 192mb --maxmemory-policy noeviction
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [foodhub]
+
+  api:
+    <<: *app
+    build:
+      context: .
+      dockerfile: infra/prod.Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ''
+        NEXT_PUBLIC_MARKETPLACE_HOST: ${PLATFORM_DOMAIN}
+        NEXT_PUBLIC_PLATFORM_DOMAIN: ${PLATFORM_DOMAIN}
+        # Browser-side Maps key. Empty is a supported state: the map picker falls back to
+        # OpenStreetMap tiles rather than rendering Google's "can't load correctly" box.
+        # Restrict this one by HTTP referrer; GOOGLE_MAPS_SERVER_KEY is the IP-restricted
+        # sibling the API geocodes with and is never sent to a browser.
+        NEXT_PUBLIC_GOOGLE_MAPS_KEY: ${NEXT_PUBLIC_GOOGLE_MAPS_KEY:-}
+    working_dir: /app/apps/api
+    # Migrations run on boot so a deploy is one unit; `migrate deploy` is a no-op once current.
+    command: sh -c "npx prisma migrate deploy && node dist/main.js"
+    volumes:
+      - media:/app/apps/api/storage/media
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=foodhub_foodhub
+      # The API answers on EVERY hostname this stack serves — the marketplace, the admin
+      # panel and every vendor storefront — so the browser always talks to its own origin
+      # and there is no CORS anywhere. Priority beats the catch-all web router below.
+      - traefik.http.routers.foodhub-api.rule=(${TRAEFIK_ALL_HOSTS_RULE}) && (PathPrefix(`/api`) || PathPrefix(`/media`) || PathPrefix(`/realtime`) || Path(`/health`))
+      - traefik.http.routers.foodhub-api.entrypoints=websecure
+      - traefik.http.routers.foodhub-api.tls.certresolver=letsencrypt
+      # Higher than the catch-all web router, so /api wins on the same hostname.
+      - traefik.http.routers.foodhub-api.priority=100
+      - traefik.http.services.foodhub-api.loadbalancer.server.port=4000
+      # /metrics is deliberately NOT routed: it is an internal scrape target and would
+      # otherwise leak vendor names and order volumes to anyone who asked.
+
+  web:
+    <<: *app
+    working_dir: /app/apps/web
+    command: npm run start
+    depends_on:
+      api: { condition: service_started }
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=foodhub_foodhub
+      # The marketplace on the apex, plus one entry per vendor storefront.
+      #
+      # These are listed explicitly rather than matched with HostRegexp because Traefik
+      # can only request an HTTP-01 certificate for a hostname it actually knows — a
+      # regex matches infinitely many names, so a HostRegexp router gets no certificate
+      # at all and TLS simply fails. Adding a vendor means appending one hostname to
+      # TRAEFIK_WEB_RULE and re-running `up -d`. Note Traefik v3's Host() takes exactly
+      # one hostname — a list must be OR-ed with `||`, not comma-separated as in v2.
+      #
+      # For unbounded vendor-owned custom domains, the answer is on-demand TLS (see the
+      # Caddyfile in this repo, whose `ask` endpoint is already implemented in the API)
+      # or a DNS-01 wildcard — neither of which is possible on a domain we don't control.
+      - traefik.http.routers.foodhub-web.rule=${TRAEFIK_WEB_RULE}
+      - traefik.http.routers.foodhub-web.entrypoints=websecure
+      - traefik.http.routers.foodhub-web.tls.certresolver=letsencrypt
+      - traefik.http.routers.foodhub-web.priority=10
+      - traefik.http.services.foodhub-web.loadbalancer.server.port=3000
+
+  admin:
+    <<: *app
+    working_dir: /app/apps/admin
+    command: npm run start
+    depends_on:
+      api: { condition: service_started }
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=foodhub_foodhub
+      - traefik.http.routers.foodhub-admin.rule=${TRAEFIK_ADMIN_RULE}
+      - traefik.http.routers.foodhub-admin.entrypoints=websecure
+      - traefik.http.routers.foodhub-admin.tls.certresolver=letsencrypt
+      # Above the storefront wildcard so admin.<domain> is not treated as a vendor slug.
+      - traefik.http.routers.foodhub-admin.priority=50
+      - traefik.http.services.foodhub-admin.loadbalancer.server.port=3001
+
+volumes:
+  pgdata:
+  redisdata:
+  media:
+
+networks:
+  foodhub:

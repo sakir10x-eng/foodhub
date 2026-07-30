@@ -1,0 +1,87 @@
+# Production-shaped stack. For local development `npm run dev` is faster — this file is
+# what the VPS runs, and what you use if you would rather not install Postgres yourself.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: foodhub
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-foodhub}
+      POSTGRES_DB: foodhub
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - '127.0.0.1:5432:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U foodhub']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    # Queue jobs must survive a restart; orders in flight are not disposable.
+    command: redis-server --appendonly yes
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: infra/api.Dockerfile
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://foodhub:${POSTGRES_PASSWORD:-foodhub}@postgres:5432/foodhub?schema=public
+      REDIS_URL: redis://redis:6379
+      PORT: '4000'
+    env_file: [.env]
+    volumes:
+      - media:/app/apps/api/storage/media
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  web:
+    build:
+      context: .
+      dockerfile: infra/web.Dockerfile
+      args:
+        APP: web
+    environment:
+      NODE_ENV: production
+    env_file: [.env]
+    depends_on: [api]
+
+  admin:
+    build:
+      context: .
+      dockerfile: infra/web.Dockerfile
+      args:
+        APP: admin
+    environment:
+      NODE_ENV: production
+    env_file: [.env]
+    depends_on: [api]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+    depends_on: [web, admin, api]
+
+volumes:
+  pgdata:
+  redisdata:
+  media:
+  caddydata:
+  caddyconfig:

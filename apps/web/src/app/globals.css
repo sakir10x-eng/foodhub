@@ -1,0 +1,163 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --brand: 232 83 63;
+  --brand-soft: 253 240 237;
+  /*
+   * Jakarta for the interface, Hind Siliguri behind it for Bengali: a vendor types their
+   * menu in whichever they think in, and "চা" set in a Latin fallback is the difference
+   * between a restaurant and a broken page. Both are self-hosted by next/font, so neither
+   * costs a third-party request or a layout shift.
+   */
+  --font-sans: var(--font-jakarta), var(--font-bengali), ui-sans-serif, system-ui, -apple-system,
+    'Segoe UI', Roboto, sans-serif;
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    /* Never let a wide element make the whole page scroll sideways on a phone. */
+    overflow-x: hidden;
+  }
+  body {
+    @apply bg-surface text-ink antialiased;
+    font-family: var(--font-sans);
+  }
+  /* Tap targets stay >= 44px; iOS refuses to zoom inputs at >= 16px. */
+  button,
+  a,
+  input,
+  select,
+  textarea {
+    font-size: max(16px, 1em);
+  }
+  ::selection {
+    background: rgb(var(--brand) / 0.18);
+  }
+}
+
+@layer components {
+  /* Grey placeholder blocks, never spinners — an empty screen with a spinner reads
+     as "broken", a skeleton reads as "nearly there". */
+  .skeleton {
+    @apply relative overflow-hidden rounded-lg bg-surface-sunk;
+  }
+  .skeleton::after {
+    @apply absolute inset-0 -translate-x-full animate-shimmer;
+    content: '';
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.65), transparent);
+  }
+
+  .btn {
+    @apply inline-flex min-h-[48px] items-center justify-center gap-2 rounded-xl px-5 text-[15px] font-semibold
+           transition active:scale-[.98] disabled:pointer-events-none disabled:opacity-45;
+  }
+  .btn-brand {
+    @apply btn bg-brand text-white shadow-card;
+  }
+  .btn-ghost {
+    @apply btn border border-surface-line bg-white text-ink;
+  }
+
+  .field {
+    @apply w-full rounded-xl border border-surface-line bg-white px-4 py-3 text-[15px] outline-none
+           placeholder:text-ink-faint focus:border-brand focus:ring-4 focus:ring-brand/10;
+  }
+
+  .card {
+    @apply rounded-2xl border border-surface-line bg-white shadow-card;
+  }
+
+  /* Hide scrollbars on the horizontal category rail without killing scrollability. */
+  .no-bar {
+    scrollbar-width: none;
+  }
+  .no-bar::-webkit-scrollbar {
+    display: none;
+  }
+
+  /*
+   * A horizontal rail that snaps and bleeds to both edges of the app column.
+   *
+   * `touch-action: pan-x` is load-bearing on iOS: without it, a diagonal swipe that
+   * starts on an offer card scrolls the rail AND the page, and the menu jumps while the
+   * thumb is still down.
+   */
+  .rail {
+    @apply no-bar -mx-3 flex snap-x snap-mandatory gap-2.5 overflow-x-auto px-3 pb-1;
+    touch-action: pan-x;
+  }
+
+  /* The round glass buttons that float over the cover photo. */
+  .glass-btn {
+    @apply grid h-9 w-9 place-items-center rounded-full bg-white/90 text-ink shadow-float backdrop-blur
+           transition active:scale-95;
+  }
+
+  /*
+   * A floating control over the dish photo: add, or the quantity stepper it becomes.
+   * Both are the same size and sit in the same place so the swap does not move the target
+   * out from under a thumb that is already on its way down.
+   */
+  .dish-ctrl {
+    @apply absolute -bottom-1.5 -right-1.5 flex h-9 items-center rounded-xl shadow-float;
+  }
+}
+
+/* Respect the user's motion preference — vestibular disorders are not an edge case. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ─────────────────────────────────────────── vendor landing page ─── */
+@layer utilities {
+  /*
+   * The hero animation: an order travelling from a storefront and from the
+   * marketplace into one shared kitchen queue. Built in CSS rather than shipped as a
+   * GIF — it stays sharp on any screen, costs no bytes, and can be switched off for
+   * people who ask for reduced motion (a GIF cannot).
+   */
+  @keyframes flow-dot {
+    0%   { offset-distance: 0%;   opacity: 0; }
+    12%  { opacity: 1; }
+    88%  { opacity: 1; }
+    100% { offset-distance: 100%; opacity: 0; }
+  }
+  @keyframes rise-in {
+    from { transform: translateY(10px); opacity: 0; }
+    to   { transform: translateY(0);    opacity: 1; }
+  }
+  @keyframes tick-status {
+    0%, 26%   { transform: translateY(0); }
+    33%, 59%  { transform: translateY(-2rem); }
+    66%, 92%  { transform: translateY(-4rem); }
+    100%      { transform: translateY(-6rem); }
+  }
+  @keyframes pulse-ring {
+    0%   { transform: scale(.85); opacity: .55; }
+    70%  { transform: scale(1.5); opacity: 0; }
+    100% { transform: scale(1.5); opacity: 0; }
+  }
+
+  .flow-dot {
+    offset-rotate: 0deg;
+    animation: flow-dot 3.2s cubic-bezier(.55,0,.45,1) infinite;
+  }
+  .status-reel { animation: tick-status 7s steps(1, end) infinite; }
+  .pulse-ring  { animation: pulse-ring 2.4s ease-out infinite; }
+  .rise-in     { animation: rise-in .5s cubic-bezier(.22,1,.36,1) both; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .flow-dot, .status-reel, .pulse-ring, .rise-in { animation: none !important; }
+  /* Without the reel animation the strip must still show a sensible frame. */
+  .status-reel { transform: translateY(-4rem); }
+}

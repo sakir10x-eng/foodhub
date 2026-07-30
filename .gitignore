@@ -1,0 +1,19 @@
+node_modules/
+dist/
+.next/
+out/
+*.tsbuildinfo
+
+# Secrets — .env.example is the template that IS committed.
+.env
+.env.local
+.env.*.local
+
+# Uploaded media lives on a volume/CDN, never in the repo.
+apps/api/storage/
+
+coverage/
+*.log
+.DS_Store
+.idea/
+.vscode/

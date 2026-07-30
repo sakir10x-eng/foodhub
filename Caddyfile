@@ -1,0 +1,68 @@
+# FoodHub edge.
+#
+# One binary handles TLS for every vendor's own domain. The `ask` endpoint is the
+# important bit: Caddy calls it before issuing a certificate for an unknown hostname, and
+# the API answers by checking the `domains` table. Without it, anyone could point a DNS
+# record at us and make us mint unlimited Let's Encrypt certificates until we hit the
+# rate limit for everyone.
+
+{
+	email ops@foodhub.com.bd
+
+	on_demand_tls {
+		ask http://api:4000/api/internal/caddy/ask
+		# Cheap backstop in front of the `ask` lookup itself.
+		interval 2m
+		burst 8
+	}
+}
+
+(common) {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Frame-Options "SAMEORIGIN"
+		-Server
+	}
+
+	# The API and the realtime socket share an origin with the site, so the browser
+	# never pays for a CORS preflight on the ordering path.
+	handle /api/* {
+		reverse_proxy api:4000
+	}
+	handle /realtime* {
+		reverse_proxy api:4000
+	}
+	handle /media/* {
+		header Cache-Control "public, max-age=31536000, immutable"
+		reverse_proxy api:4000
+	}
+}
+
+# ── the mother marketplace + every vendor subdomain ────────────────────────────
+foodhub.com.bd, *.foodhub.com.bd {
+	import common
+	# A wildcard certificate needs a DNS challenge; configure your provider here.
+	# tls { dns cloudflare {env.CLOUDFLARE_API_TOKEN} }
+	reverse_proxy web:3000
+}
+
+# ── the vendor admin panel ─────────────────────────────────────────────────────
+admin.foodhub.com.bd {
+	import common
+	reverse_proxy admin:3001
+}
+
+# ── every vendor's own custom domain ───────────────────────────────────────────
+# No hostnames are listed: this block matches anything, and on-demand TLS only issues a
+# certificate once the `ask` endpoint above confirms the domain belongs to a real tenant.
+:443 {
+	tls {
+		on_demand
+	}
+	import common
+	reverse_proxy web:3000
+}

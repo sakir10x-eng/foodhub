@@ -1,0 +1,31 @@
+{
+  "name": "foodhub",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Dual-channel food commerce platform — vendor storefronts (SaaS) + mother marketplace, one backend.",
+  "engines": { "node": ">=20.9" },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build:shared": "npm run build -w @foodhub/shared",
+    "build": "npm run build:shared && npm run build -w @foodhub/api && npm run build -w @foodhub/web && npm run build -w @foodhub/admin",
+    "dev": "node scripts/dev.mjs",
+    "dev:api": "npm run dev -w @foodhub/api",
+    "dev:web": "npm run dev -w @foodhub/web",
+    "dev:admin": "npm run dev -w @foodhub/admin",
+    "db:up": "bash scripts/pg.sh start",
+    "db:down": "bash scripts/pg.sh stop",
+    "db:migrate": "npm run db:migrate -w @foodhub/api",
+    "db:push": "npm run db:push -w @foodhub/api",
+    "db:seed": "npm run db:seed -w @foodhub/api",
+    "db:studio": "npm run db:studio -w @foodhub/api",
+    "test": "npm run test -w @foodhub/api",
+    "lighthouse": "node scripts/lighthouse-gate.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "concurrently": "^9.1.0"
+  }
+}
