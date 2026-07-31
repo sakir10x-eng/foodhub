@@ -18,8 +18,10 @@ export function middleware(req: NextRequest) {
   const isMarketplace = host === MARKETPLACE_HOST || host === `www.${MARKETPLACE_HOST}`;
   const { pathname } = req.nextUrl;
 
-  // Shared routes (checkout, order tracking, mock pay) render the same on both channels.
-  const shared = ['/checkout', '/order', '/pay', '/_next', '/favicon', '/api'];
+  // Shared routes (checkout, order tracking, the rider run sheet, mock pay) render the
+  // same on both channels. A new top-level page MUST be listed here: on the marketplace
+  // host the branch below rewrites anything unlisted to /m/<path>, which 404s.
+  const shared = ['/checkout', '/order', '/pay', '/rider', '/_next', '/favicon', '/api'];
   if (shared.some((p) => pathname.startsWith(p))) return NextResponse.next();
 
   const url = req.nextUrl.clone();

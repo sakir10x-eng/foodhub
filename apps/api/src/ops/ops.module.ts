@@ -1,8 +1,9 @@
 import { Body, Controller, Delete, Get, Module, Param, Post, Put, Query } from '@nestjs/common';
 import { z } from 'zod';
-import { bdPhone } from '@foodhub/shared';
+import { bdPhone, riderLocationSchema, type RiderLocationInput } from '@foodhub/shared';
 import { OpsService } from './ops.service';
 import { ReviewsModule } from '../reviews/reviews.module';
+import { RealtimeGateway } from '../realtime/realtime.gateway';
 import { ReviewsService } from '../reviews/reviews.service';
 import { ZodBody } from '../common/zod.pipe';
 import { CurrentTenant, CurrentUser, PlatformScope, Public, RequireTenant, Roles } from '../common/decorators';
@@ -77,7 +78,10 @@ class VendorOpsController {
 
 @Controller('rider')
 class RiderController {
-  constructor(private readonly ops: OpsService) {}
+  constructor(
+    private readonly ops: OpsService,
+    private readonly realtime: RealtimeGateway,
+  ) {}
 
   /**
    * A rider's own run sheet.
@@ -91,6 +95,30 @@ class RiderController {
   @Get('queue')
   queue(@Query('token') token: string) {
     return this.ops.riderQueue(token ?? '');
+  }
+
+  /**
+   * The rider's phone reporting in, every thirty seconds while the run sheet is open.
+   *
+   * Returns how many customers that position reached, which is also what the rider's
+   * screen shows them — "sharing with 2 deliveries" is a truthful, checkable statement
+   * about who can see them, and it goes to zero the moment their last drop is done.
+   */
+  @Public()
+  @PlatformScope('a rider reports position against its own run-sheet token')
+  @Post('location')
+  async location(@Body(new ZodBody(riderLocationSchema)) dto: RiderLocationInput) {
+    const result = await this.ops.reportRiderLocation(dto);
+    if (result.accepted) {
+      for (const order of result.live) {
+        this.realtime.emitRiderPosition(order.code, order.customerPhone, {
+          lat: dto.lat,
+          lng: dto.lng,
+          at: result.at,
+        });
+      }
+    }
+    return { accepted: result.accepted, sharingWith: result.orders };
   }
 }
 

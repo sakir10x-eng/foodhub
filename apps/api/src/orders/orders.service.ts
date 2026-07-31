@@ -5,8 +5,11 @@ import {
   canCustomerCancel,
   estimateEta,
   etaClock,
+  isFixFresh,
+  riderVisibleFor,
   OrderDto,
   OrderStatus,
+  RiderPin,
   isTerminal,
 } from '@foodhub/shared';
 import { PrismaService } from '../prisma/prisma.service';
@@ -22,6 +25,9 @@ const ORDER_INCLUDE = {
   events: { orderBy: { createdAt: 'asc' } },
   // Carried so the tracker knows whether to still offer the rating prompt.
   review: { select: { rating: true } },
+  // Who is carrying it and where they are. Whether any of that reaches the customer is
+  // decided in `riderPin` below, not here.
+  rider: { select: { name: true, phone: true, lat: true, lng: true, locationAt: true } },
 } satisfies Prisma.OrderInclude;
 
 export interface OrderListQuery {
@@ -357,6 +363,30 @@ function etaFields(order: any): { etaAt?: { earliest: string; latest: string } |
   return { etaAt: { earliest: earliest.toISOString(), latest: latest.toISOString() } };
 }
 
+/**
+ * What the customer is told about the rider — which is nothing at all unless the food is
+ * genuinely on its way to them.
+ *
+ * The name and phone appear as soon as the order is out for delivery, because a customer
+ * standing at a locked gate needs to be able to ring somebody. The POSITION is held to a
+ * stricter test: it also has to be recent. A stale fix is dropped rather than shown, so
+ * the map can say "no live position" instead of drawing a rider who has not moved in
+ * twenty minutes and letting the customer draw their own wrong conclusion.
+ */
+function riderPin(order: any): RiderPin | null {
+  const rider = order.rider;
+  if (!rider || !riderVisibleFor(order.status)) return null;
+
+  const fresh = isFixFresh(rider.locationAt);
+  return {
+    name: rider.name,
+    phone: rider.phone,
+    lat: fresh ? rider.lat : null,
+    lng: fresh ? rider.lng : null,
+    locationAt: fresh ? rider.locationAt.toISOString() : null,
+  };
+}
+
 export function toDto(order: any): OrderDto {
   return {
     id: order.id,
@@ -391,6 +421,14 @@ export function toDto(order: any): OrderDto {
     placedAt: order.placedAt.toISOString(),
     ...etaFields(order),
     canCancel: canCustomerCancel(order.status),
+    rider: riderPin(order),
+    riderId: order.riderId ?? null,
+    // Only when the customer actually dropped a pin. Without one there is nowhere
+    // truthful to draw the destination, and a guess would send the map to the wrong road.
+    destination:
+      typeof order.deliveryAddress?.lat === 'number' && typeof order.deliveryAddress?.lng === 'number'
+        ? { lat: order.deliveryAddress.lat, lng: order.deliveryAddress.lng }
+        : null,
     events: (order.events ?? []).map((e: any) => ({
       status: e.status,
       note: e.note,

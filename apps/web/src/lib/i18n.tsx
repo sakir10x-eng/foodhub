@@ -67,6 +67,14 @@ const en = {
   'order.etaPickup': 'Ready {window}',
   'order.delivered': 'Delivered',
   'order.cancelled': 'Cancelled',
+
+  'rider.call': 'Call',
+  'rider.onTheWay': 'On the way to you',
+  'rider.away': '{km} km away',
+  'rider.noFix': 'On the way — no live position right now',
+  'rider.updated': 'updated {ago}',
+  'rider.justNow': 'just now',
+  'rider.minutesAgo': '{n} min ago',
 } as const;
 
 type Key = keyof typeof en;
@@ -117,6 +125,14 @@ const bn: Partial<Record<Key, string>> = {
   'order.etaPickup': '{window}-এ তৈরি হবে',
   'order.delivered': 'ডেলিভারি হয়েছে',
   'order.cancelled': 'বাতিল',
+
+  'rider.call': 'ফোন',
+  'rider.onTheWay': 'আপনার দিকে আসছে',
+  'rider.away': '{km} কিমি দূরে',
+  'rider.noFix': 'পথে আছে — এই মুহূর্তে লাইভ অবস্থান নেই',
+  'rider.updated': '{ago} আপডেট',
+  'rider.justNow': 'এইমাত্র',
+  'rider.minutesAgo': '{n} মিনিট আগে',
 };
 
 const dictionaries: Record<Locale, Partial<Record<Key, string>>> = { en, bn };

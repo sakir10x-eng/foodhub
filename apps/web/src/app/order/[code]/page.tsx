@@ -18,6 +18,7 @@ import { PushOptIn } from '../../../components/PushOptIn';
 import { PurchaseEvent } from '../../../components/Pixels';
 import { AppShell } from '../../../components/AppShell';
 import { Icon } from '../../../components/Icon';
+import { TrackingMap } from '../../../components/TrackingMap';
 import { useI18n, localiseDigits } from '../../../lib/i18n';
 
 /**
@@ -63,6 +64,21 @@ export default function OrderPage({ params }: { params: Promise<{ code: string }
     socket.on('order:status', (update: { status: OrderStatus; events: OrderDto['events'] }) => {
       setOrder((prev) => (prev ? { ...prev, status: update.status, events: update.events } : prev));
     });
+    /*
+     * The rider's dot, pushed every thirty seconds while they are on the road. Merged
+     * into the order we already hold rather than refetching: a position is four numbers,
+     * and re-reading the whole order to move a pin would be a query per rider per
+     * customer per half-minute.
+     *
+     * Ignored unless the server has already told us there is a rider to show — the
+     * entitlement decision belongs to the API, and a socket event must not be able to
+     * conjure one onto a screen that was not given one.
+     */
+    socket.on('order:rider', (pos: { lat: number; lng: number; at: string }) => {
+      setOrder((prev) =>
+        prev?.rider ? { ...prev, rider: { ...prev.rider, lat: pos.lat, lng: pos.lng, locationAt: pos.at } } : prev,
+      );
+    });
     return () => {
       socket.close();
     };
@@ -107,6 +123,10 @@ export default function OrderPage({ params }: { params: Promise<{ code: string }
           })}
         </p>
       )}
+
+      {/* Only ever rendered when the server chose to send a rider — see `riderPin` in
+          the orders service. The map does not decide who may be watched. */}
+      {order.rider && <TrackingMap rider={order.rider} destination={order.destination ?? null} />}
 
       <div className="card mt-5 p-4">
         {cancelled ? (

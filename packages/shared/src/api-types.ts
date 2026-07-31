@@ -1,5 +1,6 @@
 import type { Channel, Fulfillment, InvoiceStatus, OrderStatus, PaymentStatus, Plan, PlanStatus, Role, SettlementStatus, SslStatus } from './enums';
 import type { DeliveryZone } from './pricing';
+import type { RiderPin } from './rider';
 
 /** Wire shapes returned by the API. Money fields are always poisha integers. */
 
@@ -243,6 +244,22 @@ export interface OrderDto {
    * is worse than no button.
    */
   canCancel?: boolean;
+  /**
+   * The rider, and where they are — present ONLY while the order is on its way and the
+   * last fix is recent. See `riderVisibleFor` and `isFixFresh` in ./rider.ts; both rules
+   * are about a person's privacy, so they are enforced server-side and this field simply
+   * is not populated when they say no.
+   */
+  rider?: RiderPin | null;
+  /**
+   * Who is assigned, as an opaque id. Separate from `rider` on purpose: the vendor's
+   * panel needs to know an order already has someone on it from the moment it is
+   * assigned, while the customer-facing `rider` block stays shut until the food is
+   * genuinely on its way. A uuid tells a customer nothing, so this one is not gated.
+   */
+  riderId?: string | null;
+  /** Where the food is going, when the customer dropped a pin. Anchors the tracking map. */
+  destination?: { lat: number; lng: number } | null;
   events?: { status: OrderStatus; note: string | null; createdAt: string }[];
 }
 

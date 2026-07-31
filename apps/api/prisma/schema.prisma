@@ -514,6 +514,17 @@ model Rider {
   /// Rotated per rider so a delivery link cannot be guessed from an order code.
   token    String  @unique
 
+  /// Where the rider last reported being, and when.
+  ///
+  /// One position, overwritten — not a trail. We need "where is my food now", and a
+  /// history of everywhere a named worker has been all week is a different thing that
+  /// nobody asked for and that would have to be defended. `locationAt` is what makes a
+  /// stale fix ignorable: a pin frozen twenty minutes ago is worse than no pin, because
+  /// the customer believes it.
+  lat        Float?
+  lng        Float?
+  locationAt DateTime?
+
   orders    Order[]
   createdAt DateTime @default(now())
 

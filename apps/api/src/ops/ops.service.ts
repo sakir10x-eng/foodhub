@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { randomBytes } from 'node:crypto';
+import { RIDER_FIX_MAX_ACCURACY_M } from '@foodhub/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantContext } from '../common/tenant-context';
 import { CacheService } from '../infra/cache.service';
@@ -177,7 +178,64 @@ export class OpsService {
 
     return { rider: { name: rider.name, store: rider.tenant.name }, orders };
   }
+
+  /**
+   * A rider's phone reporting where it is.
+   *
+   * Authorised by the run-sheet token, so a position can only be filed against the rider
+   * it belongs to. Two things are thrown away here rather than downstream, because once a
+   * bad fix is stored it is indistinguishable from a good one:
+   *
+   *   - a fix too vague to be a location (a wifi lookup indoors can be kilometres out);
+   *   - a fix from a rider with nothing on the road, which is a phone left reporting
+   *     after the shift and nobody's business.
+   *
+   * The write is a plain overwrite: we keep where the rider IS, never where they have
+   * been. A trail of a named worker's week is a different product with different
+   * obligations, and not one anybody asked for.
+   */
+  async reportRiderLocation(
+    input: { token: string; lat: number; lng: number; accuracy?: number },
+  ): Promise<RiderLocationResult> {
+    const rider = await TenantContext.runAsPlatform('a rider reports position against its own token', () =>
+      this.prisma.db.rider.findUnique({
+        where: { token: input.token },
+        select: { id: true, tenantId: true, isActive: true },
+      }),
+    );
+    if (!rider || !rider.isActive) throw new NotFoundException('This delivery link is no longer valid');
+
+    if (input.accuracy !== undefined && input.accuracy > RIDER_FIX_MAX_ACCURACY_M) {
+      // Accepted, not stored. The rider's phone should not have to understand our rules,
+      // and an error here would make their app look broken while they are driving.
+      return { accepted: false, reason: 'accuracy', orders: 0 };
+    }
+
+    const now = new Date();
+    const live = await TenantContext.runAsTenant(rider.tenantId, async () => {
+      await this.prisma.db.rider.update({
+        where: { id: rider.id },
+        data: { lat: input.lat, lng: input.lng, locationAt: now },
+      });
+      // Only orders actually on the road: this is both the push list and the answer to
+      // "is anyone entitled to see this fix at all".
+      return this.prisma.db.order.findMany({
+        where: { riderId: rider.id, status: 'ON_THE_WAY' },
+        select: { code: true, customerPhone: true },
+      });
+    });
+
+    return { accepted: true, at: now.toISOString(), orders: live.length, live };
+  }
 }
+
+/**
+ * Discriminated so the caller cannot read `live` off a rejected fix — the push loop and
+ * the rejection path are different shapes, and the compiler should say so.
+ */
+export type RiderLocationResult =
+  | { accepted: false; reason: 'accuracy'; orders: 0 }
+  | { accepted: true; at: string; orders: number; live: { code: string; customerPhone: string }[] };
 
 /* ─────────────────────────────────────────────────────────── helpers ─── */
 

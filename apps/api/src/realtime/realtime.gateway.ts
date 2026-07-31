@@ -78,6 +78,19 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
     });
   }
 
+  /**
+   * The rider's dot, pushed to the one customer entitled to see it.
+   *
+   * Addressed to the same `order:code:phone` room the tracker already joins, so a
+   * position never reaches a socket that could not already read the order. Nothing is
+   * broadcast to the tenant room: the kitchen has the vendor panel for that, and a
+   * position fanned out to every open storefront tab is a leak waiting to happen.
+   */
+  emitRiderPosition(code: string, customerPhone: string, pin: { lat: number; lng: number; at: string }) {
+    const phone = (customerPhone ?? '').replace(/\D/g, '').slice(-10);
+    this.server?.to(`order:${code}:${phone}`).emit('order:rider', { code, ...pin });
+  }
+
   /** Menu availability flips, pushed to open storefronts. */
   emitAvailability(tenantId: string, productId: string, isAvailable: boolean) {
     this.server?.to(`tenant:${tenantId}`).emit('menu:availability', { productId, isAvailable });

@@ -4,12 +4,27 @@ import { useCallback, useEffect, useState } from 'react';
 import { formatBDT, ORDER_STATUS_LABEL, type OrderDto, type Paginated } from '@foodhub/shared';
 import { adminApi } from '../../lib/auth';
 import { Banner, PageHeader, Shell } from '../../components/Shell';
+import { Riders } from '../../components/Riders';
 
 const FILTERS = [
   { key: '', label: 'All' },
   { key: 'OWN_STORE', label: 'Own store' },
   { key: 'MARKETPLACE', label: 'Marketplace' },
 ] as const;
+
+/**
+ * Where a customer-facing page lives, seen from the admin panel.
+ *
+ * The panel is always `admin.<platform domain>`, so dropping that one label lands on the
+ * marketplace host — which is where the rider run sheet is served from. Derived from the
+ * live origin rather than an env var so a vendor on a custom domain still gets a link
+ * that works from the browser they are actually using.
+ */
+function storefrontUrl(): string {
+  if (typeof window === 'undefined') return '';
+  const { protocol, host } = window.location;
+  return `${protocol}//${host.replace(/^admin\./, '')}`;
+}
 
 export default function OrdersPage() {
   return (
@@ -46,6 +61,8 @@ function OrderHistory() {
 
       <div className="p-4">
         {error && <Banner tone="error">{error}</Banner>}
+
+        <Riders storefrontUrl={storefrontUrl()} />
 
         <div className="mb-4 flex gap-2">
           {FILTERS.map((f) => (

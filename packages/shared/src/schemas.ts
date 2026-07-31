@@ -278,6 +278,23 @@ export const orderCancelSchema = z.object({
 });
 export type OrderCancelInput = z.infer<typeof orderCancelSchema>;
 
+/**
+ * A rider reporting where they are.
+ *
+ * The token is the rider's own run-sheet token — the same credential that lets them see
+ * their deliveries — so a position can only ever be filed against the rider it belongs to.
+ * `accuracy` is accepted and stored nowhere: it is used to throw away the wild fixes a
+ * phone emits indoors before they ever reach a customer's screen.
+ */
+export const riderLocationSchema = z.object({
+  token: z.string().trim().min(8).max(80),
+  lat: z.number().min(-90).max(90),
+  lng: z.number().min(-180).max(180),
+  /** Metres of uncertainty, straight from the browser's Geolocation API. */
+  accuracy: z.number().min(0).max(100_000).optional(),
+});
+export type RiderLocationInput = z.infer<typeof riderLocationSchema>;
+
 /* --------------------------------------------------------------- tenants */
 
 export const geoPointSchema = z.object({
