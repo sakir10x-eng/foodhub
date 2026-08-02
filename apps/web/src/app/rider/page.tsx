@@ -49,6 +49,16 @@ interface Queue {
   invites: Invite[];
 }
 
+/** A delivery nobody has taken yet. Deliberately thinner than a Drop — see Available. */
+interface Offer {
+  id: string;
+  code: string;
+  status: string;
+  store: string;
+  area: string;
+  dueOnDelivery: number;
+}
+
 function RunSheet() {
   const token = useSearchParams().get('token') ?? '';
   const [queue, setQueue] = useState<Queue | null>(null);
@@ -105,14 +115,19 @@ function RunSheet() {
 
       <Invites token={token} invites={queue.invites} onAnswered={load} />
 
+      <Available token={token} onClaimed={load} />
+
       <LocationSharing token={token} />
 
+      <h2 className="mt-6 px-1 text-xs font-bold uppercase tracking-wide text-ink-faint">
+        Carrying now
+      </h2>
       {queue.orders.length === 0 ? (
-        <p className="mt-6 rounded-2xl bg-surface-edge px-4 py-10 text-center text-sm text-ink-muted">
+        <p className="mt-2 rounded-2xl bg-surface-edge px-4 py-10 text-center text-sm text-ink-muted">
           Nothing to deliver right now.
         </p>
       ) : (
-        <ul className="mt-4 space-y-3">
+        <ul className="mt-2 space-y-3">
           {queue.orders.map((order) => (
             <li key={order.id}>
               <Drop order={order} />
@@ -121,6 +136,157 @@ function RunSheet() {
         </ul>
       )}
     </AppShell>
+  );
+}
+
+/**
+ * Work waiting in this rider's own villages, and the switch that turns it on.
+ *
+ * The duty toggle and the list live together on purpose: "am I working" and "what is there
+ * to do" are one question to the person holding the phone, and splitting them across two
+ * screens is how a rider ends up off duty all morning without noticing.
+ *
+ * An offer shows the shop, the village and the cash — enough to decide — and no street
+ * address, because everyone on duty can read this list. The address arrives with the job.
+ */
+function Available({ token, onClaimed }: { token: string; onClaimed: () => Promise<void> | void }) {
+  const [onDuty, setOnDuty] = useState(false);
+  const [offers, setOffers] = useState<Offer[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const res = await clientApi<{ onDuty: boolean; offers: Offer[] }>('/rider/available', {
+        method: 'POST',
+        body: JSON.stringify({ token }),
+      });
+      setOnDuty(res.onDuty);
+      setOffers(res.offers);
+    } catch {
+      /* One failed poll is a tunnel. The next one lands. */
+    }
+  }, [token]);
+
+  useEffect(() => {
+    void refresh();
+    // Shorter than the run sheet's minute: this is the list people are racing on, and a
+    // card that has already gone is worse than a slightly emptier screen.
+    const timer = setInterval(refresh, 20_000);
+    return () => clearInterval(timer);
+  }, [refresh]);
+
+  const setDuty = async (next: boolean) => {
+    setBusy('duty');
+    try {
+      await clientApi('/rider/duty', { method: 'POST', body: JSON.stringify({ token, onDuty: next }) });
+      setOnDuty(next);
+      await refresh();
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const act = async (offer: Offer, path: 'accept' | 'skip') => {
+    setBusy(offer.id);
+    setNote(null);
+    try {
+      await clientApi(`/rider/${path}`, {
+        method: 'POST',
+        body: JSON.stringify({ token, orderId: offer.id }),
+      });
+      await Promise.all([refresh(), onClaimed()]);
+    } catch (err) {
+      // Losing a race is the ordinary outcome here, not a fault — so it is said plainly
+      // and the list is refreshed underneath, rather than left showing a card that is gone.
+      setNote(err instanceof Error ? err.message : 'That did not go through.');
+      await refresh();
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <section className="mt-4">
+      <div
+        className={`flex items-center justify-between gap-3 rounded-2xl border p-4 ${
+          onDuty ? 'border-emerald-500/50 bg-emerald-50' : 'border-surface-line'
+        }`}
+      >
+        <div className="min-w-0">
+          <h2 className="font-bold">{onDuty ? 'On duty' : 'Off duty'}</h2>
+          <p className="mt-0.5 text-[13px] text-ink-muted">
+            {onDuty
+              ? offers.length === 0
+                ? 'Nothing waiting in your area right now.'
+                : `${offers.length} ${offers.length === 1 ? 'delivery' : 'deliveries'} waiting in your area.`
+              : 'You will not be offered any new deliveries.'}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setDuty(!onDuty)}
+          disabled={busy === 'duty'}
+          aria-pressed={onDuty}
+          className={`shrink-0 rounded-full px-4 py-2.5 text-sm font-bold transition disabled:opacity-60 ${
+            onDuty ? 'bg-emerald-600 text-white' : 'border border-surface-line text-brand'
+          }`}
+        >
+          {onDuty ? 'Go off' : 'Go on duty'}
+        </button>
+      </div>
+
+      {note && (
+        <p role="alert" className="mt-2 rounded-xl bg-amber-50 px-3 py-2 text-sm text-amber-800">
+          {note}
+        </p>
+      )}
+
+      {onDuty && offers.length > 0 && (
+        <ul className="mt-3 space-y-2">
+          {offers.map((offer) => (
+            <li key={offer.id} className="card p-4">
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="font-mono text-sm font-bold">{offer.code}</span>
+                <span className="text-[11px] font-bold uppercase tracking-wide text-ink-faint">
+                  {offer.status === 'READY' ? 'Ready now' : 'Being prepared'}
+                </span>
+              </div>
+
+              <p className="mt-1 flex items-center gap-1.5 text-[15px] font-bold text-brand">
+                <Icon name="pin" size={14} />
+                {offer.store}
+              </p>
+              {/* The village, not the door. Enough to say yes or no; the rest comes after. */}
+              <p className="text-sm text-ink-muted">to {offer.area || 'an unnamed area'}</p>
+
+              <p className="mt-2 text-xl font-extrabold tabular-nums">
+                {offer.dueOnDelivery > 0 ? `Collect ${formatBDT(offer.dueOnDelivery)}` : 'Already paid'}
+              </p>
+
+              <div className="mt-3 flex gap-2">
+                <button
+                  type="button"
+                  disabled={busy === offer.id}
+                  onClick={() => act(offer, 'accept')}
+                  className="flex-1 rounded-full bg-brand px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60"
+                >
+                  Take it
+                </button>
+                <button
+                  type="button"
+                  disabled={busy === offer.id}
+                  onClick={() => act(offer, 'skip')}
+                  className="rounded-full border border-surface-line px-4 py-2.5 text-sm font-bold text-ink-muted disabled:opacity-60"
+                >
+                  Pass
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 

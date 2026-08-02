@@ -5,6 +5,92 @@ import { ORDER_STATUS_LABEL, type OrderDto } from '@foodhub/shared';
 import { adminApi } from '../lib/auth';
 import { Banner } from './Shell';
 
+interface RiderArea {
+  id: string;
+  label: string;
+  shape: { areas?: string[] };
+}
+
+/**
+ * Which villages a rider covers.
+ *
+ * Names, not a map. A drawn boundary is supported underneath and matches a dropped pin
+ * when there is one, but most village orders arrive with an area typed into a field and
+ * nothing else — so the thing the shop can actually fill in, on the phone, between
+ * customers, is a list of names.
+ *
+ * A rider with no areas is offered nothing rather than everything. That is deliberate: the
+ * opposite would push every delivery in the district onto somebody who has just been added.
+ */
+function AreaEditor({ riderId }: { riderId: string }) {
+  const [open, setOpen] = useState(false);
+  const [value, setValue] = useState('');
+  const [saved, setSaved] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const load = async () => {
+    const areas = await adminApi<RiderArea[]>(`/vendor/ops/riders/${riderId}/areas`);
+    setValue(areas.flatMap((a) => a.shape?.areas ?? []).join(', '));
+    setLoaded(true);
+  };
+
+  const toggle = async () => {
+    const next = !open;
+    setOpen(next);
+    if (next && !loaded) await load().catch(() => setLoaded(true));
+  };
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      const names = value.split(',').map((s) => s.trim()).filter(Boolean);
+      // One area row holding every name, rather than one row per name: the vendor thinks
+      // of this as "where Rakib goes", singular, and the shape supports a list natively.
+      await adminApi(`/vendor/ops/riders/${riderId}/areas`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          areas: names.length ? [{ label: 'Areas', shape: { areas: names } }] : [],
+        }),
+      });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={toggle}
+        className="shrink-0 rounded-full border border-surface-line px-3 py-1.5 text-xs font-semibold text-ink-muted transition hover:border-brand hover:text-brand"
+      >
+        Areas
+      </button>
+      {open && (
+        <div className="mt-2 w-full basis-full">
+          <input
+            className="field w-full text-sm"
+            placeholder="Bazar, Uttar Para, চর কাদিরপুর"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+          />
+          <div className="mt-2 flex items-center gap-2">
+            <button type="button" onClick={save} disabled={busy} className="btn-brand h-9 min-h-0 px-3 text-xs">
+              {saved ? 'Saved ✓' : 'Save areas'}
+            </button>
+            <p className="text-xs text-ink-faint">
+              Separate with commas. Only deliveries to these areas are offered to this rider.
+            </p>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 interface Rider {
   id: string;
   name: string;
@@ -135,11 +221,12 @@ export function Riders({ storefrontUrl }: { storefrontUrl: string }) {
       ) : (
         <ul className="mb-4 space-y-2">
           {riders.map((rider) => (
-            <li key={rider.id} className="flex items-center gap-3 rounded-xl bg-surface-sunk px-3 py-2">
+            <li key={rider.id} className="flex flex-wrap items-center gap-3 rounded-xl bg-surface-sunk px-3 py-2">
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-semibold">{rider.name}</p>
                 <p className="truncate text-xs text-ink-faint">{rider.phone}</p>
               </div>
+              {rider.approved && <AreaEditor riderId={rider.id} />}
               {rider.approved ? (
                 /* The link IS the rider's login, so it is copied rather than displayed in
                    full — a token read aloud across a counter is a token everybody has. */

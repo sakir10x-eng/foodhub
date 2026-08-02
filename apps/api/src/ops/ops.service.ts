@@ -1,7 +1,18 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { randomBytes } from 'node:crypto';
-import { RIDER_FIX_MAX_ACCURACY_M } from '@foodhub/shared';
+import {
+  RIDER_FIX_MAX_ACCURACY_M,
+  riderCoversDelivery,
+  type DeliveryTarget,
+  type GeoShape,
+} from '@foodhub/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantContext } from '../common/tenant-context';
 import { CacheService } from '../infra/cache.service';
@@ -265,7 +276,7 @@ export class OpsService {
   private async riderByToken(token: string) {
     const rider = await this.prisma.db.rider.findUnique({
       where: { token },
-      select: { id: true, name: true, isActive: true },
+      select: { id: true, name: true, isActive: true, onDuty: true },
     });
     if (!rider || !rider.isActive) throw new NotFoundException('This delivery link is no longer valid');
     return rider;
@@ -316,6 +327,196 @@ export class OpsService {
       .sort((a, b) => a.placedAt.getTime() - b.placedAt.getTime());
 
     return { rider: { name: rider.name, shops: shopIds.length }, orders, invites };
+  }
+
+  /* ──────────────────────────────────────────────────── duty, areas, and the job pool */
+
+  /**
+   * The rider going on or off the road.
+   *
+   * Coming off duty does **not** drop the deliveries they are already carrying — those are
+   * a promise made to a customer with food in a bag, and only a human can undo that. It
+   * stops new work being offered, which is the thing a rider actually needs at the end of
+   * a shift.
+   */
+  async setDuty(token: string, onDuty: boolean) {
+    const rider = await this.riderByToken(token);
+    await this.prisma.db.rider.update({
+      where: { id: rider.id },
+      data: { onDuty, dutySince: onDuty ? new Date() : null },
+    });
+    return { onDuty };
+  }
+
+  /**
+   * A shop setting up a rider's patch.
+   *
+   * The patch belongs to the **rider**, not to the relationship: one person has one
+   * territory, and slicing it per shop would mean a rider covering "উত্তর পাড়া" for the
+   * grocer and not for the tea stall next door, which describes nothing real. The
+   * consequence is that any shop the rider has accepted can edit it — acceptable among a
+   * handful of shops in one village, and worth revisiting the day that stops being true.
+   *
+   * A rider with no areas is offered nothing rather than everything; see
+   * `riderCoversDelivery`.
+   */
+  async setAreas(tenantId: string, riderId: string, areas: { label: string; shape: GeoShape }[]) {
+    const link = await this.prisma.db.riderShop.findUnique({
+      where: { riderId_tenantId: { riderId, tenantId } },
+      select: { approved: true },
+    });
+    if (!link?.approved) throw new NotFoundException('Rider not found');
+
+    // Replaced wholesale rather than diffed: the vendor edits this as one list, and a
+    // partial update that half-applied would leave a patch nobody intended.
+    await this.prisma.db.$transaction([
+      this.prisma.db.riderArea.deleteMany({ where: { riderId } }),
+      ...areas.map((area) =>
+        this.prisma.db.riderArea.create({ data: { riderId, label: area.label, shape: area.shape as any } }),
+      ),
+    ]);
+    return this.listAreas(riderId);
+  }
+
+  async areasForShop(tenantId: string, riderId: string) {
+    const link = await this.prisma.db.riderShop.findUnique({
+      where: { riderId_tenantId: { riderId, tenantId } },
+      select: { approved: true },
+    });
+    if (!link?.approved) throw new NotFoundException('Rider not found');
+    return this.listAreas(riderId);
+  }
+
+  listAreas(riderId: string) {
+    return this.prisma.db.riderArea.findMany({
+      where: { riderId },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true, label: true, shape: true },
+    });
+  }
+
+  /**
+   * Deliveries waiting in this rider's patch, across every shop they carry for.
+   *
+   * Three things are withheld from an offer, and each one is a decision:
+   *
+   *   - **the street address**, until they accept. Any rider on duty can read this list,
+   *     and a list of every doorstep in the village is not something to hand out for the
+   *     price of switching a toggle on. The area name is enough to decide with.
+   *   - **the customer's phone**, for the same reason.
+   *   - anything they have already passed on, which would otherwise climb back to the top
+   *     of the list every thirty seconds until they took it by accident.
+   */
+  async availableWork(token: string) {
+    const rider = await this.riderByToken(token);
+    if (!rider.onDuty) return { onDuty: false, offers: [] };
+
+    const [shopIds, areas, skipped] = await Promise.all([
+      this.approvedShopIds(rider.id),
+      this.listAreas(rider.id),
+      this.prisma.db.riderOfferSkip
+        .findMany({ where: { riderId: rider.id }, select: { orderId: true } })
+        .then((rows) => new Set(rows.map((r) => r.orderId))),
+    ]);
+    const shapes = areas.map((a) => a.shape as GeoShape);
+
+    const perShop = await Promise.all(
+      shopIds.map((tenantId) =>
+        TenantContext.runAsTenant(tenantId, async () => {
+          const [shop, orders] = await Promise.all([
+            this.prisma.db.tenant.findUnique({ where: { id: tenantId }, select: { name: true } }),
+            this.prisma.db.order.findMany({
+              // CONFIRMED as well as READY: in a village the rider often has further to
+              // travel than the kitchen has to cook, so waiting for READY to offer the job
+              // means the food sits on the counter going cold.
+              where: {
+                riderId: null,
+                fulfillment: 'DELIVERY',
+                status: { in: ['CONFIRMED', 'PREPARING', 'READY'] },
+              },
+              orderBy: { placedAt: 'asc' },
+              select: {
+                id: true, code: true, status: true, dueOnDelivery: true,
+                deliveryAddress: true, placedAt: true,
+              },
+            }),
+          ]);
+
+          return orders
+            .filter((order) => !skipped.has(order.id))
+            .filter((order) => riderCoversDelivery(shapes, addressTarget(order.deliveryAddress)))
+            .map((order) => ({
+              id: order.id,
+              code: order.code,
+              status: order.status,
+              store: shop?.name ?? '',
+              area: (order.deliveryAddress as any)?.area ?? '',
+              dueOnDelivery: order.dueOnDelivery,
+              placedAt: order.placedAt,
+            }));
+        }),
+      ),
+    );
+
+    const offers = perShop.flat().sort((a, b) => a.placedAt.getTime() - b.placedAt.getTime());
+    return { onDuty: true, offers };
+  }
+
+  /**
+   * A rider taking a delivery.
+   *
+   * Two riders tapping the same card at the same moment is the normal case, not the edge
+   * case — everybody is looking at the same list. So the claim is a conditional update
+   * that only matches while `riderId` is still null: exactly one of them changes a row,
+   * and the other is told plainly rather than being left believing they have it.
+   */
+  async acceptWork(token: string, orderId: string) {
+    const rider = await this.riderByToken(token);
+    if (!rider.onDuty) throw new BadRequestException('Go on duty before taking a delivery');
+
+    const tenantId = await this.tenantForOffer(rider.id, orderId);
+
+    const claimed = await TenantContext.runAsTenant(tenantId, () =>
+      this.prisma.db.order.updateMany({
+        where: { id: orderId, riderId: null, status: { in: ['CONFIRMED', 'PREPARING', 'READY'] } },
+        data: { riderId: rider.id },
+      }),
+    );
+    if (claimed.count === 0) throw new ConflictException('Someone else has taken this delivery');
+
+    return { ok: true };
+  }
+
+  /** Passing on a delivery. It stays fully available to every other rider. */
+  async skipWork(token: string, orderId: string) {
+    const rider = await this.riderByToken(token);
+    await this.tenantForOffer(rider.id, orderId);
+
+    await this.prisma.db.riderOfferSkip.upsert({
+      where: { riderId_orderId: { riderId: rider.id, orderId } },
+      create: { riderId: rider.id, orderId },
+      update: {},
+    });
+    return { ok: true };
+  }
+
+  /**
+   * Which of the rider's shops this order belongs to — and a refusal if it is none of them.
+   *
+   * Every write a rider makes goes through here first. An order id arrives from a phone,
+   * and without this check a rider could name any order in the database and take it,
+   * including one from a shop that has never heard of them.
+   */
+  private async tenantForOffer(riderId: string, orderId: string): Promise<string> {
+    const shopIds = await this.approvedShopIds(riderId);
+
+    for (const tenantId of shopIds) {
+      const found = await TenantContext.runAsTenant(tenantId, () =>
+        this.prisma.db.order.findUnique({ where: { id: orderId }, select: { id: true } }),
+      );
+      if (found) return tenantId;
+    }
+    throw new NotFoundException('That delivery is not available to you');
   }
 
   /** Shops waiting on this rider to say yes. */
@@ -424,6 +625,24 @@ export class OpsService {
 export type RiderLocationResult =
   | { accepted: false; reason: 'accuracy'; orders: 0 }
   | { accepted: true; at: string; orders: number; live: { code: string; customerPhone: string }[] };
+
+/**
+ * What we can tell the matcher about where an order is going.
+ *
+ * `deliveryAddress` is free-form JSON written by a checkout that has changed shape more
+ * than once, so every field here is treated as absent until proven otherwise. A `lat`
+ * without an `lng` is not half a pin, it is no pin — and passing one through as a number
+ * would put a delivery on the equator.
+ */
+function addressTarget(address: unknown): DeliveryTarget {
+  const a = (address ?? {}) as Record<string, unknown>;
+  const lat = typeof a.lat === 'number' ? a.lat : null;
+  const lng = typeof a.lng === 'number' ? a.lng : null;
+  return {
+    point: lat !== null && lng !== null ? { lat, lng } : null,
+    area: typeof a.area === 'string' ? a.area : null,
+  };
+}
 
 /* ─────────────────────────────────────────────────────────── helpers ─── */
 

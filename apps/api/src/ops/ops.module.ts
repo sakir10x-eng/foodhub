@@ -10,6 +10,26 @@ import { CurrentTenant, CurrentUser, PlatformScope, Public, RequireTenant, Roles
 import type { AuthedUser } from '../common/decorators';
 import type { RequestTenant } from '../common/request-types';
 
+const geoPoint = z.object({ lat: z.number(), lng: z.number() });
+
+/**
+ * One patch a rider covers.
+ *
+ * Every part of the shape is optional because in a village most patches will be nothing
+ * but a list of names — a polygon needs a map, a map needs a signal, and neither is
+ * guaranteed. An empty shape is allowed through and simply matches nothing, which is the
+ * honest result of describing a place with no information.
+ */
+const riderAreaSchema = z.object({
+  label: z.string().trim().min(1).max(60),
+  shape: z.object({
+    areas: z.array(z.string().trim().min(1).max(60)).max(30).optional(),
+    center: geoPoint.nullish(),
+    radiusKm: z.number().positive().max(50).nullish(),
+    polygon: z.array(geoPoint).max(200).nullish(),
+  }),
+});
+
 const hoursSchema = z.object({
   autoOpenClose: z.boolean(),
   hours: z
@@ -56,6 +76,21 @@ class VendorOpsController {
   @Delete('riders/:id')
   removeRider(@CurrentTenant() tenant: RequestTenant, @Param('id') id: string) {
     return this.ops.removeRider(tenant.id, id);
+  }
+
+  @Get('riders/:id/areas')
+  riderAreas(@CurrentTenant() tenant: RequestTenant, @Param('id') id: string) {
+    return this.ops.areasForShop(tenant.id, id);
+  }
+
+  /** Which villages this rider covers. Replaces the whole list — see setAreas. */
+  @Put('riders/:id/areas')
+  setRiderAreas(
+    @CurrentTenant() tenant: RequestTenant,
+    @Param('id') id: string,
+    @Body(new ZodBody(z.object({ areas: z.array(riderAreaSchema).max(20) }))) dto: any,
+  ) {
+    return this.ops.setAreas(tenant.id, id, dto.areas);
   }
 
   @Post('orders/:id/rider')
@@ -129,6 +164,46 @@ class RiderController {
    * of who they are — requiring a login here would mean the consent step could not ship
    * until riders had accounts, and the invitation is what makes sharing a rider safe.
    */
+  /** Going on or off the road. Off is the default, and only the rider flips it. */
+  @Public()
+  @PlatformScope('a rider goes on duty against its own run-sheet token')
+  @Post('duty')
+  duty(@Body(new ZodBody(z.object({ token: z.string().min(1), onDuty: z.boolean() }))) dto: any) {
+    return this.ops.setDuty(dto.token, dto.onDuty);
+  }
+
+  /**
+   * Deliveries waiting in this rider's patch.
+   *
+   * Deliberately POST-with-token rather than a GET query string: this is the one rider
+   * endpoint that lists work the rider does not yet own, and a token in a URL ends up in
+   * proxy logs, browser history and anything pasted into a chat.
+   */
+  @Public()
+  @PlatformScope('a rider lists work in its own areas against its own run-sheet token')
+  @Post('available')
+  available(@Body(new ZodBody(z.object({ token: z.string().min(1) }))) dto: any) {
+    return this.ops.availableWork(dto.token);
+  }
+
+  @Public()
+  @PlatformScope('a rider claims a delivery against its own run-sheet token')
+  @Post('accept')
+  accept(
+    @Body(new ZodBody(z.object({ token: z.string().min(1), orderId: z.string().uuid() }))) dto: any,
+  ) {
+    return this.ops.acceptWork(dto.token, dto.orderId);
+  }
+
+  @Public()
+  @PlatformScope('a rider passes on a delivery against its own run-sheet token')
+  @Post('skip')
+  skip(
+    @Body(new ZodBody(z.object({ token: z.string().min(1), orderId: z.string().uuid() }))) dto: any,
+  ) {
+    return this.ops.skipWork(dto.token, dto.orderId);
+  }
+
   @Public()
   @PlatformScope('a rider answers an invitation against its own run-sheet token')
   @Post('invites')
