@@ -10,6 +10,7 @@ export const TENANT_SCOPED_MODELS = new Set([
   'Category',
   'Product',
   'Order',
+  'Rider',
   'Coupon',
   'LedgerEntry',
   'Settlement',

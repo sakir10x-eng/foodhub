@@ -54,8 +54,8 @@ class VendorOpsController {
   }
 
   @Delete('riders/:id')
-  removeRider(@Param('id') id: string) {
-    return this.ops.removeRider(id);
+  removeRider(@CurrentTenant() tenant: RequestTenant, @Param('id') id: string) {
+    return this.ops.removeRider(tenant.id, id);
   }
 
   @Post('orders/:id/rider')

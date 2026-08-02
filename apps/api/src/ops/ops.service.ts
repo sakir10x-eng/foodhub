@@ -123,9 +123,17 @@ export class OpsService {
 
   /* ───────────────────────────────────────────────────────── riders */
 
+  /**
+   * A vendor's own riders.
+   *
+   * `tenantId` is written out even though the guard now adds it, because this select
+   * returns `token` — and a token is a working delivery link into whichever shop's
+   * customer addresses, phone numbers and cash amounts the rider is carrying. A filter
+   * that only exists in one layer is one refactor away from not existing.
+   */
   listRiders(tenantId: string) {
     return this.prisma.db.rider.findMany({
-      where: { isActive: true },
+      where: { tenantId, isActive: true },
       orderBy: { name: 'asc' },
       select: { id: true, name: true, phone: true, token: true },
     });
@@ -140,16 +148,34 @@ export class OpsService {
     });
   }
 
-  async removeRider(id: string) {
+  async removeRider(tenantId: string, id: string) {
     // Deactivated, never deleted: past orders point at this rider, and a delivery with no
     // record of who carried it is exactly what you need on the day something goes wrong.
-    await this.prisma.db.rider.update({ where: { id }, data: { isActive: false } });
+    const removed = await this.prisma.db.rider.updateMany({
+      where: { id, tenantId },
+      data: { isActive: false },
+    });
+    // Somebody else's rider is not "already gone", it is not ours to touch — and saying so
+    // is also how the tenant-isolation test can tell a refusal from a no-op.
+    if (removed.count === 0) throw new NotFoundException('Rider not found');
     return { ok: true };
   }
 
   async assignRider(orderId: string, riderId: string | null) {
     const order = await this.prisma.db.order.findUnique({ where: { id: orderId }, select: { id: true } });
     if (!order) throw new NotFoundException('Order not found');
+
+    // The order is guarded, but `riderId` arrives from the client and nothing here had
+    // ever checked it: a vendor could hand their delivery to another shop's rider, who
+    // would then see this shop's customer on their run sheet. Resolving the rider through
+    // the guarded client is the check — a foreign id simply finds no row.
+    if (riderId) {
+      const rider = await this.prisma.db.rider.findUnique({
+        where: { id: riderId },
+        select: { id: true, isActive: true },
+      });
+      if (!rider || !rider.isActive) throw new NotFoundException('Rider not found');
+    }
 
     await this.prisma.db.order.update({ where: { id: orderId }, data: { riderId } });
     return { ok: true };
