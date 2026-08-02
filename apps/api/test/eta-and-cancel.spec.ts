@@ -8,6 +8,7 @@ import {
   type OrderStatus,
 } from '@foodhub/shared';
 import { PrismaService } from '../src/prisma/prisma.service';
+import { RiderLedgerService } from '../src/rider-ledger/rider-ledger.service';
 import { OrdersService } from '../src/orders/orders.service';
 import { LedgerService } from '../src/ledger/ledger.service';
 import { LoyaltyService } from '../src/loyalty/loyalty.service';
@@ -85,9 +86,11 @@ describe('cuisine tags', () => {
  */
 describe('customer cancellation', () => {
   const prisma = new PrismaService();
+  const riderLedger = new RiderLedgerService(prisma);
   const orders = new OrdersService(
     prisma,
     new LedgerService(prisma),
+    riderLedger,
     new LoyaltyService(prisma),
     // The queue and the realtime gateway are fire-and-forget notifications; a cancelled
     // order is cancelled whether or not the SMS goes out.

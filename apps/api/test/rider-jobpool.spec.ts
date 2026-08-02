@@ -1,5 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../src/prisma/prisma.service';
+import { RiderLedgerService } from '../src/rider-ledger/rider-ledger.service';
 import { CacheService } from '../src/infra/cache.service';
 import { OpsService } from '../src/ops/ops.service';
 import { TenantContext } from '../src/common/tenant-context';
@@ -20,7 +21,8 @@ import { TenantContext } from '../src/common/tenant-context';
  */
 describe('the area job pool', () => {
   const prisma = new PrismaService();
-  const ops = new OpsService(prisma, new CacheService(new ConfigService({})), {} as any);
+  const riderLedger = new RiderLedgerService(prisma);
+  const ops = new OpsService(prisma, new CacheService(new ConfigService({})), {} as any, riderLedger);
 
   let shop: string;
   let rakib: string;

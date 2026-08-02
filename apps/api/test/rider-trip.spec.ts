@@ -1,6 +1,7 @@
 import { ConfigService } from '@nestjs/config';
 import { planStops, riderCoordsVisible, type PlannedStop } from '@foodhub/shared';
 import { PrismaService } from '../src/prisma/prisma.service';
+import { RiderLedgerService } from '../src/rider-ledger/rider-ledger.service';
 import { CacheService } from '../src/infra/cache.service';
 import { OpsService } from '../src/ops/ops.service';
 import { OrdersService, toDto } from '../src/orders/orders.service';
@@ -90,15 +91,17 @@ describe('who may see the rider on a batched run', () => {
 
 describe('a run across two shops, end to end', () => {
   const prisma = new PrismaService();
+  const riderLedger = new RiderLedgerService(prisma);
   const orders = new OrdersService(
     prisma,
     new LedgerService(prisma),
+    riderLedger,
     new LoyaltyService(prisma),
     { enqueue: async () => undefined } as any,
     { emitOrderUpdate: () => undefined, emitNewOrder: () => undefined } as any,
     { settleOnDelivery: async () => undefined } as any,
   );
-  const ops = new OpsService(prisma, new CacheService(new ConfigService({})), orders);
+  const ops = new OpsService(prisma, new CacheService(new ConfigService({})), orders, riderLedger);
 
   let kitchen: string;
   let grocer: string;

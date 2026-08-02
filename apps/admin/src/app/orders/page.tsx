@@ -5,6 +5,7 @@ import { formatBDT, ORDER_STATUS_LABEL, type OrderDto, type Paginated } from '@f
 import { adminApi } from '../../lib/auth';
 import { Banner, PageHeader, Shell } from '../../components/Shell';
 import { Riders } from '../../components/Riders';
+import { RiderMoney } from '../../components/RiderMoney';
 
 const FILTERS = [
   { key: '', label: 'All' },
@@ -63,6 +64,7 @@ function OrderHistory() {
         {error && <Banner tone="error">{error}</Banner>}
 
         <Riders storefrontUrl={storefrontUrl()} />
+        <RiderMoney />
 
         <div className="mb-4 flex gap-2">
           {FILTERS.map((f) => (

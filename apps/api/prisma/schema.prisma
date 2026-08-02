@@ -115,10 +115,7 @@ model Tenant {
   ratingSum   Int @default(0)
   ratingCount Int @default(0)
 
-  /// ── payment policy
-  /// Fake cash-on-delivery orders are a real cost in BD food delivery: the kitchen
-  /// cooks, the rider rides, nobody answers the door. These let a vendor require money
-  /// up front instead of absorbing that.
+  /// ── delivery proof
   /// Require the customer's code at the door before a rider may mark a delivery done.
   ///
   /// Off by default, and that is not timidity. Switching it on for everybody at once would
@@ -127,6 +124,17 @@ model Tenant {
   /// texted, so it works even where SMS does not.
   deliveryOtpRequired Boolean @default(false)
 
+  /// ── rider pay and cash exposure
+  /// What a rider is paid for one completed delivery, in poisha.
+  riderFeePerDelivery Int @default(3000)
+  /// How much of the shop's cash a rider may be carrying before new cash-on-delivery work
+  /// stops being offered to them. Prepaid orders are unaffected — the risk is the cash.
+  riderCashLimit      Int @default(500000)
+
+  /// ── payment policy
+  /// Fake cash-on-delivery orders are a real cost in BD food delivery: the kitchen
+  /// cooks, the rider rides, nobody answers the door. These let a vendor require money
+  /// up front instead of absorbing that.
   codEnabled       Boolean @default(true)
   /// Share of the order that must be paid before the kitchen starts. 0 = none, 50 =
   /// half, 100 = full prepayment.
@@ -198,6 +206,7 @@ model Tenant {
   referrals           Referral[]
   couponFunding       CouponFunding[]
   riderShops          RiderShop[]
+  riderLedger         RiderLedgerEntry[]
 
   @@index([listedOnMarketplace, isOpen])
   /// GIN: the marketplace filter asks whether the array CONTAINS a tag, which a btree
@@ -556,6 +565,7 @@ model Rider {
   skips     RiderOfferSkip[]
   trips     Trip[]
   attempts  DeliveryAttempt[]
+  ledger    RiderLedgerEntry[]
   orders    Order[]
   createdAt DateTime @default(now())
 
@@ -582,6 +592,69 @@ model RiderArea {
 
   @@index([riderId])
   @@map("rider_areas")
+}
+
+/// Which of a rider's two books an entry belongs in.
+///
+/// They are separate and must stay separate. CASH is the **shop's** money that the rider
+/// happens to be carrying; EARNINGS is the rider's own money that we owe them. Add them
+/// together and "৳500 not yet handed in" becomes indistinguishable from "৳500 of wages
+/// owed" — two facts with opposite signs pointing at opposite people.
+enum RiderAccount {
+  CASH
+  EARNINGS
+}
+
+enum RiderLedgerType {
+  /// + CASH. Taken at a doorstep.
+  CASH_COLLECTED
+  /// − CASH. Handed in at a shop or a hub.
+  CASH_DEPOSITED
+  /// + EARNINGS. The fee for one completed delivery.
+  DELIVERY_FEE
+  /// ± EARNINGS. A bonus or a deduction, entered by a human with a reason attached.
+  ADJUSTMENT
+  /// − EARNINGS. Wages paid out.
+  PAYOUT
+}
+
+/// A rider's money, in two books.
+///
+/// Same shape as the vendor ledger and for the same reasons — including the one that has
+/// already cost this project a bug: **`balanceAfter` is found by ordering on `seq`, never
+/// on `createdAt`**. Postgres `now()` is transaction-scoped, so every row written in one
+/// transaction shares a timestamp and "latest by createdAt" picks among them arbitrarily.
+model RiderLedgerEntry {
+  id  String @id @default(uuid()) @db.Uuid
+  seq Int    @unique @default(autoincrement())
+
+  riderId String @db.Uuid
+  rider   Rider  @relation(fields: [riderId], references: [id], onDelete: Cascade)
+  /// Which shop's money, or which shop is paying. A rider carries for several.
+  tenantId String @db.Uuid
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  account RiderAccount
+  type    RiderLedgerType
+  /// Signed poisha. Never a float, ever.
+  amount  Int
+  /// Running balance of THIS account for THIS rider after this entry.
+  balanceAfter Int
+
+  orderId String? @db.Uuid
+  order   Order?  @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  memo    String  @default("")
+  /// Who entered it: "system", or a vendor user id for a deposit or an adjustment.
+  actor   String  @default("system")
+
+  createdAt DateTime @default(now())
+
+  /// One entry of each kind per order, which is what makes a replayed DELIVERED harmless.
+  /// Deposits and payouts carry no order, and Postgres allows many NULLs here.
+  @@unique([orderId, type])
+  @@index([riderId, account, seq])
+  @@index([tenantId, createdAt])
+  @@map("rider_ledger_entries")
 }
 
 enum AttemptFailReason {
@@ -1013,6 +1086,7 @@ model Order {
   deliveryOtpAttempts Int     @default(0)
 
   attempts DeliveryAttempt[]
+  riderLedger RiderLedgerEntry[]
 
   /// When the rider actually took it off the counter.
   ///

@@ -4,6 +4,7 @@ import { bdPhone, riderLocationSchema, type RiderLocationInput } from '@foodhub/
 import { OpsService } from './ops.service';
 import { ReviewsModule } from '../reviews/reviews.module';
 import { OrdersModule } from '../orders/orders.module';
+import { RiderLedgerModule } from '../rider-ledger/rider-ledger.module';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
 import { ReviewsService } from '../reviews/reviews.service';
 import { ZodBody } from '../common/zod.pipe';
@@ -272,6 +273,14 @@ class RiderController {
    * of who they are — requiring a login here would mean the consent step could not ship
    * until riders had accounts, and the invitation is what makes sharing a rider safe.
    */
+  /** What the rider is carrying and what they have earned. Their own money, their screen. */
+  @Public()
+  @PlatformScope('a rider reads its own money against its own run-sheet token')
+  @Post('money')
+  money(@Body(new ZodBody(z.object({ token: z.string().min(1) }))) dto: any) {
+    return this.ops.riderMoney(dto.token);
+  }
+
   @Public()
   @PlatformScope('a rider answers an invitation against its own run-sheet token')
   @Post('invites')
@@ -290,7 +299,7 @@ class RiderController {
 @Module({
   // OrdersModule for OrdersService: a rider completing a drop must move the order through
   // the same code a vendor does, or DELIVERED would skip settlement and loyalty.
-  imports: [ReviewsModule, OrdersModule],
+  imports: [ReviewsModule, OrdersModule, RiderLedgerModule],
   controllers: [VendorOpsController, RiderController],
   providers: [OpsService],
   exports: [OpsService],

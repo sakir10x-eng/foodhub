@@ -115,6 +115,8 @@ function RunSheet() {
 
       <Invites token={token} invites={queue.invites} onAnswered={load} />
 
+      <Money token={token} />
+
       <Available token={token} onClaimed={load} />
 
       <LocationSharing token={token} />
@@ -152,6 +154,51 @@ interface Stop {
   phone: string;
   deliveryAddress: RiderOrder['deliveryAddress'] | null;
   dueOnDelivery: number;
+}
+
+/**
+ * What the rider is carrying and what they have earned.
+ *
+ * On their own screen because both numbers are about them: one is money they will have to
+ * hand over and account for, the other is money they are owed. A rider who can only find
+ * out what they owe by asking at the counter is a rider who finds out they were wrong.
+ *
+ * Cash in hand is the larger of the two on purpose. It is the number that has to reach
+ * zero before the day is finished.
+ */
+function Money({ token }: { token: string }) {
+  const [money, setMoney] = useState<{ cash: number; earnings: number } | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setMoney(await clientApi('/rider/money', { method: 'POST', body: JSON.stringify({ token }) }));
+    } catch {
+      /* one failed poll is a tunnel */
+    }
+  }, [token]);
+
+  useEffect(() => {
+    void load();
+    const timer = setInterval(load, 60_000);
+    return () => clearInterval(timer);
+  }, [load]);
+
+  if (!money) return null;
+
+  return (
+    <section className="mt-4 grid grid-cols-2 gap-2">
+      <div className={`rounded-2xl p-4 ${money.cash > 0 ? 'bg-amber-50' : 'bg-surface-sunk'}`}>
+        <p className="text-[13px] text-ink-muted">Cash to hand in</p>
+        <p className="mt-0.5 text-2xl font-extrabold tabular-nums">{formatBDT(money.cash)}</p>
+      </div>
+      <div className="rounded-2xl bg-surface-sunk p-4">
+        <p className="text-[13px] text-ink-muted">You have earned</p>
+        <p className="mt-0.5 text-2xl font-extrabold tabular-nums text-emerald-700">
+          {formatBDT(money.earnings)}
+        </p>
+      </div>
+    </section>
+  );
 }
 
 /**

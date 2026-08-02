@@ -18,6 +18,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantContext } from '../common/tenant-context';
 import { LedgerService } from '../ledger/ledger.service';
+import { RiderLedgerService } from '../rider-ledger/rider-ledger.service';
 import { LoyaltyService } from '../loyalty/loyalty.service';
 import { ReferralsService } from '../marketing/referrals.service';
 import { JOBS, QueueService } from '../infra/queue.service';
@@ -55,6 +56,7 @@ export class OrdersService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly ledger: LedgerService,
+    private readonly riderLedger: RiderLedgerService,
     private readonly loyalty: LoyaltyService,
     private readonly queue: QueueService,
     private readonly realtime: RealtimeGateway,
@@ -218,6 +220,21 @@ export class OrdersService {
         if (next === 'ON_THE_WAY' && !order.deliveryOtp) {
           data.deliveryOtp = makeDeliveryOtp();
           data.deliveryOtpAttempts = 0;
+        }
+
+        // ── the rider's own books, on BOTH channels
+        //
+        // Unlike the vendor ledger below, this is not marketplace-only: the cash a rider
+        // is carrying is the shop's money whichever channel the order came through, and a
+        // rider whose own-store deliveries went unrecorded would hand in the wrong amount
+        // every evening. Idempotency is the unique index on (orderId, type), not a flag —
+        // a replayed DELIVERED collides instead of paying twice.
+        if (next === 'DELIVERED' && order.riderId) {
+          const shop = await tx.tenant.findUnique({
+            where: { id: order.tenantId },
+            select: { riderFeePerDelivery: true },
+          });
+          await this.riderLedger.postDelivered(tx, order, shop?.riderFeePerDelivery ?? 0);
         }
 
         // ── settlement: marketplace money only, and only once

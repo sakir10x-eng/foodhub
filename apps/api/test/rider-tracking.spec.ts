@@ -6,6 +6,7 @@ import {
   type OrderStatus,
 } from '@foodhub/shared';
 import { PrismaService } from '../src/prisma/prisma.service';
+import { RiderLedgerService } from '../src/rider-ledger/rider-ledger.service';
 import { CacheService } from '../src/infra/cache.service';
 import { OpsService } from '../src/ops/ops.service';
 import { OrdersService, toDto } from '../src/orders/orders.service';
@@ -42,10 +43,12 @@ describe('rider tracking rules', () => {
 
 describe('rider position, end to end', () => {
   const prisma = new PrismaService();
-  const ops = new OpsService(prisma, new CacheService(new ConfigService({})), {} as any);
+  const riderLedger = new RiderLedgerService(prisma);
+  const ops = new OpsService(prisma, new CacheService(new ConfigService({})), {} as any, riderLedger);
   const orders = new OrdersService(
     prisma,
     new LedgerService(prisma),
+    riderLedger,
     new LoyaltyService(prisma),
     { enqueue: async () => undefined } as any,
     { emitOrderUpdate: () => undefined, emitNewOrder: () => undefined } as any,

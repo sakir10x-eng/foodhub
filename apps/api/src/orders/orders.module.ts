@@ -22,6 +22,7 @@ import { OrdersService } from './orders.service';
 import { CheckoutService } from './checkout.service';
 import { PaymentsService } from '../payments/payments.service';
 import { LedgerService } from '../ledger/ledger.service';
+import { RiderLedgerModule } from '../rider-ledger/rider-ledger.module';
 import { LoyaltyModule } from '../loyalty/loyalty.module';
 import { ReviewsService } from '../reviews/reviews.service';
 import { BkashTransport } from '../payments/bkash.transport';
@@ -248,7 +249,7 @@ class PaymentsController {
 @Module({
   // Loyalty is imported rather than re-provided: points and store credit are money, and
   // two instances of the service would be two independent views of the same balance.
-  imports: [LoyaltyModule, ReviewsModule, RetentionModule, MarketingModule],
+  imports: [LoyaltyModule, ReviewsModule, RetentionModule, MarketingModule, RiderLedgerModule],
   controllers: [
     StorefrontCheckoutController,
     MarketplaceCheckoutController,

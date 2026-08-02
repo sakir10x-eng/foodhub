@@ -11,6 +11,7 @@ import {
   type OrderStatus,
 } from '@foodhub/shared';
 import { PrismaService } from '../src/prisma/prisma.service';
+import { RiderLedgerService } from '../src/rider-ledger/rider-ledger.service';
 import { CacheService } from '../src/infra/cache.service';
 import { OpsService } from '../src/ops/ops.service';
 import { OrdersService } from '../src/orders/orders.service';
@@ -68,15 +69,17 @@ describe('RETURNED is wired in everywhere', () => {
 
 describe('at the door', () => {
   const prisma = new PrismaService();
+  const riderLedger = new RiderLedgerService(prisma);
   const orders = new OrdersService(
     prisma,
     new LedgerService(prisma),
+    riderLedger,
     new LoyaltyService(prisma),
     { enqueue: async () => undefined } as any,
     { emitOrderUpdate: () => undefined, emitNewOrder: () => undefined } as any,
     { settleOnDelivery: async () => undefined } as any,
   );
-  const ops = new OpsService(prisma, new CacheService(new ConfigService({})), orders);
+  const ops = new OpsService(prisma, new CacheService(new ConfigService({})), orders, riderLedger);
 
   let shop: string;
   const TOKEN = 'proof-rider-token';
@@ -209,15 +212,17 @@ describe('at the door', () => {
 
 describe('when nobody answers', () => {
   const prisma = new PrismaService();
+  const riderLedger = new RiderLedgerService(prisma);
   const orders = new OrdersService(
     prisma,
     new LedgerService(prisma),
+    riderLedger,
     new LoyaltyService(prisma),
     { enqueue: async () => undefined } as any,
     { emitOrderUpdate: () => undefined, emitNewOrder: () => undefined } as any,
     { settleOnDelivery: async () => undefined } as any,
   );
-  const ops = new OpsService(prisma, new CacheService(new ConfigService({})), orders);
+  const ops = new OpsService(prisma, new CacheService(new ConfigService({})), orders, riderLedger);
 
   let shop: string;
   let riderId: string;

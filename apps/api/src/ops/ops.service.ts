@@ -23,6 +23,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { TenantContext } from '../common/tenant-context';
 import { CacheService } from '../infra/cache.service';
 import { OrdersService } from '../orders/orders.service';
+import { RiderLedgerService, overCashLimit } from '../rider-ledger/rider-ledger.service';
 
 export interface OpeningHour {
   /** 0 = Sunday. Bangladesh's week starts on Sunday, and so does this. */
@@ -49,6 +50,9 @@ export class OpsService {
     // customer's text all hang off, and a rider marking a drop done must take exactly the
     // same path a vendor does. See completeStop.
     private readonly orders: OrdersService,
+    // The rider's cash position gates what work they are offered, and their own screen
+    // shows it back to them. See availableWork and riderMoney.
+    private readonly riderLedger: RiderLedgerService,
   ) {}
 
   /* ────────────────────────────────────────────────── opening hours */
@@ -426,12 +430,13 @@ export class OpsService {
     const rider = await this.riderByToken(token);
     if (!rider.onDuty) return { onDuty: false, offers: [] };
 
-    const [shopIds, areas, skipped] = await Promise.all([
+    const [shopIds, areas, skipped, money] = await Promise.all([
       this.approvedShopIds(rider.id),
       this.listAreas(rider.id),
       this.prisma.db.riderOfferSkip
         .findMany({ where: { riderId: rider.id }, select: { orderId: true } })
         .then((rows) => new Set(rows.map((r) => r.orderId))),
+      this.riderLedger.balances(rider.id),
     ]);
     const shapes = areas.map((a) => a.shape as GeoShape);
 
@@ -439,7 +444,10 @@ export class OpsService {
       shopIds.map((tenantId) =>
         TenantContext.runAsTenant(tenantId, async () => {
           const [shop, orders] = await Promise.all([
-            this.prisma.db.tenant.findUnique({ where: { id: tenantId }, select: { name: true } }),
+            this.prisma.db.tenant.findUnique({
+              where: { id: tenantId },
+              select: { name: true, riderCashLimit: true },
+            }),
             this.prisma.db.order.findMany({
               // CONFIRMED as well as READY: in a village the rider often has further to
               // travel than the kitchen has to cook, so waiting for READY to offer the job
@@ -457,8 +465,14 @@ export class OpsService {
             }),
           ]);
 
+          // A rider already holding this shop's limit in cash is not offered more of it.
+          // Prepaid work still is: the exposure being managed is the money on them, and
+          // stopping their whole day over it would be a punishment rather than a control.
+          const capped = overCashLimit(money.cash, shop?.riderCashLimit ?? 0);
+
           return orders
             .filter((order) => !skipped.has(order.id))
+            .filter((order) => !(capped && order.dueOnDelivery > 0))
             .filter((order) => riderCoversDelivery(shapes, addressTarget(order.deliveryAddress)))
             .map((order) => ({
               id: order.id,
@@ -475,6 +489,22 @@ export class OpsService {
 
     const offers = perShop.flat().sort((a, b) => a.placedAt.getTime() - b.placedAt.getTime());
     return { onDuty: true, offers };
+  }
+
+  /**
+   * What the rider is holding and what they have earned.
+   *
+   * On their own screen because it is their money and the shop's money, and the person
+   * carrying both is the one who has to account for it at the end of the day. A rider who
+   * can only find out what they owe by asking is a rider who finds out they were wrong.
+   */
+  async riderMoney(token: string) {
+    const rider = await this.riderByToken(token);
+    const [balances, recent] = await Promise.all([
+      this.riderLedger.balances(rider.id),
+      this.riderLedger.statement(rider.id, 20),
+    ]);
+    return { ...balances, recent };
   }
 
   /**
