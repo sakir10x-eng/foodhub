@@ -13,7 +13,9 @@ import {
   canCarry,
   cartWeightGrams,
   deliveryOtpMatches,
+  isReductionOnly,
   planStops,
+  repriceOrder,
   riderCoversDelivery,
   type AttemptFailReason,
   type DeliveryTarget,
@@ -719,6 +721,102 @@ export class OpsService {
       update: {},
     });
     return { ok: true };
+  }
+
+  /* ──────────────────────────────────────────────────────── what the shop cannot supply */
+
+  /**
+   * Reprice an order because the shop has run out of something.
+   *
+   * A grocer runs out daily, and without this the only way to handle a missing item is to
+   * cancel an order somebody is waiting for. Four rules, each of them a refusal:
+   *
+   *   - **only before it leaves.** Once a rider has the bag, what is in it is settled;
+   *     changing the total then would have the rider collecting an amount that does not
+   *     match what they are carrying.
+   *   - **only downwards.** A shop may supply less than was ordered. Adding cost to an
+   *     order somebody already agreed to is a new order, made with their consent.
+   *   - **prices come from the line snapshots**, so a shop editing an order cannot also
+   *     apply a price rise that happened since it was placed.
+   *   - **an overpayment is surfaced, never netted off.** A prepaid order that shrinks
+   *     below what was charged leaves money we are holding and they are owed; a refund is
+   *     a decision somebody makes, and a number that quietly disappears is one nobody
+   *     ever gives back.
+   */
+  async repriceForStock(
+    tenantId: string,
+    orderId: string,
+    supplied: { itemId: string; qty: number }[],
+    actor: string,
+  ) {
+    return TenantContext.runAsTenant(tenantId, async () => {
+      const order = await this.prisma.db.order.findUnique({
+        where: { id: orderId },
+        select: {
+          id: true, code: true, status: true, subtotal: true, discount: true,
+          deliveryFee: true, advanceAmount: true, commissionAmount: true, channel: true,
+          tenant: { select: { commissionRateBps: true } },
+          items: { select: { id: true, qty: true, priceSnapshot: true, nameSnapshot: true } },
+        },
+      });
+      if (!order) throw new NotFoundException('Order not found');
+      if (order.status !== 'CONFIRMED' && order.status !== 'PREPARING') {
+        throw new BadRequestException('This can only be changed before the rider collects it');
+      }
+
+      const wanted = new Map(supplied.map((s) => [s.itemId, s.qty]));
+      const lines = order.items.map((item) => ({
+        id: item.id,
+        name: item.nameSnapshot,
+        priceSnapshot: item.priceSnapshot,
+        qty: item.qty,
+        suppliedQty: wanted.has(item.id) ? wanted.get(item.id)! : item.qty,
+      }));
+
+      if (!isReductionOnly(lines)) {
+        throw new BadRequestException('You can only supply less than was ordered, not more');
+      }
+      const dropped = lines.filter((l) => l.suppliedQty < l.qty);
+      if (dropped.length === 0) return { ok: true, unchanged: true };
+      if (lines.every((l) => l.suppliedQty === 0)) {
+        throw new BadRequestException('Nothing left to deliver — cancel the order instead');
+      }
+
+      const priced = repriceOrder(lines, order);
+
+      await this.prisma.db.$transaction(async (tx) => {
+        for (const line of lines) {
+          if (line.suppliedQty === line.qty) continue;
+          if (line.suppliedQty === 0) await tx.orderItem.delete({ where: { id: line.id } });
+          else await tx.orderItem.update({ where: { id: line.id }, data: { qty: line.suppliedQty } });
+        }
+
+        await tx.order.update({
+          where: { id: orderId },
+          data: {
+            subtotal: priced.subtotal,
+            discount: priced.discount,
+            total: priced.total,
+            dueOnDelivery: priced.dueOnDelivery,
+            // Commission follows the smaller order. Charging on goods that were never
+            // supplied would bill the vendor for our own arithmetic.
+            commissionAmount:
+              order.channel === 'MARKETPLACE'
+                ? Math.round(((priced.subtotal - priced.discount) * order.tenant.commissionRateBps) / 10_000)
+                : 0,
+          },
+        });
+
+        const note = dropped
+          .map((l) => (l.suppliedQty === 0 ? `removed ${l.name}` : `${l.name} ${l.qty}→${l.suppliedQty}`))
+          .join(', ');
+        await tx.orderEvent.create({
+          data: { orderId, status: order.status, actor, note: `Out of stock: ${note}` },
+        });
+      });
+
+      return { ok: true, ...priced, dropped: dropped.map((l) => l.name) };
+    });
   }
 
   /* ─────────────────────────────────────────────────────────────────────────── the run */

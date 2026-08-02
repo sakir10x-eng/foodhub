@@ -174,6 +174,19 @@ export const deliveryAddressSchema = z.object({
    */
   addressLine: z.string().trim().max(300).optional().default(''),
   area: z.string().trim().max(80).optional().default(''),
+  /**
+   * "Beside the Eidgah field, blue gate."
+   *
+   * In a village this is the address. Houses have no numbers and roads have no names, and
+   * a rider finds a door by what is next to it. Kept separate from `addressLine` so the
+   * run sheet can show it as prominently as the street, which is where it belongs.
+   */
+  landmark: z.string().trim().max(200).optional().default(''),
+  /**
+   * Ring before arriving. Common enough to be worth a checkbox: gates are locked, the
+   * house is behind a field, or somebody has to come out to the road to meet the rider.
+   */
+  callBefore: z.boolean().optional().default(false),
   city: z.string().trim().max(80).optional().default('Dhaka'),
   note: z.string().trim().max(300).optional().default(''),
   /**

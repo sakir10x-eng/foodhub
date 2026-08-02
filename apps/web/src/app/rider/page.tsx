@@ -35,7 +35,14 @@ interface RiderOrder {
   customerPhone: string;
   /** Which shop this parcel is at. A rider carrying for three cannot collect without it. */
   store: string;
-  deliveryAddress: { name?: string; phone?: string; addressLine?: string; area?: string; note?: string; lat?: number | null; lng?: number | null };
+  deliveryAddress: {
+    name?: string; phone?: string; addressLine?: string; area?: string; note?: string;
+    /** What the door is next to. In a village this is the address, not a hint. */
+    landmark?: string;
+    /** The customer asked to be rung before arrival. */
+    callBefore?: boolean;
+    lat?: number | null; lng?: number | null;
+  };
 }
 
 interface Invite {
@@ -516,6 +523,16 @@ function Run({ token }: { token: string }) {
               {stop.kind === 'PICKUP'
                 ? stop.address && <p className="text-sm text-ink-muted">{stop.address}</p>
                 : addr.area && <p className="text-sm text-ink-muted">{addr.area}</p>}
+              {/* The landmark is not a hint, it is how the door is found. Same weight as
+                  the street, because in a village there is usually no street. */}
+              {stop.kind === 'DROP' && addr.landmark && (
+                <p className="mt-1 text-[15px] font-semibold leading-snug">{addr.landmark}</p>
+              )}
+              {stop.kind === 'DROP' && addr.callBefore && (
+                <p className="mt-1 inline-block rounded-full bg-amber-100 px-2 py-0.5 text-xs font-bold text-amber-800">
+                  Call before arriving
+                </p>
+              )}
               {stop.kind === 'DROP' && addr.note && (
                 <p className="mt-1 text-sm text-ink-muted">“{addr.note}”</p>
               )}
@@ -929,6 +946,12 @@ function Drop({ order }: { order: RiderOrder }) {
 
       <p className="mt-2 text-[17px] font-semibold leading-snug">{addr.addressLine || '—'}</p>
       {addr.area && <p className="text-sm text-ink-muted">{addr.area}</p>}
+      {addr.landmark && <p className="mt-1 text-[15px] font-semibold leading-snug">{addr.landmark}</p>}
+      {addr.callBefore && (
+        <p className="mt-1 inline-block rounded-full bg-amber-100 px-2 py-0.5 text-xs font-bold text-amber-800">
+          Call before arriving
+        </p>
+      )}
       {addr.note && <p className="mt-1 text-sm text-ink-muted">“{addr.note}”</p>}
 
       {/* The single most expensive mistake on a doorstep is collecting the wrong amount,

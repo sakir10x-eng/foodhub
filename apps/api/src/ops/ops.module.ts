@@ -132,6 +132,28 @@ class VendorOpsController {
     return this.ops.resolveAlert(tenant.id, id);
   }
 
+  /**
+   * "We have run out of this."
+   *
+   * Only downwards, only before the rider collects it, and every change is written to the
+   * order's event log with the name of whoever made it.
+   */
+  @Post('orders/:id/out-of-stock')
+  outOfStock(
+    @CurrentTenant() tenant: RequestTenant,
+    @CurrentUser() user: AuthedUser,
+    @Param('id') id: string,
+    @Body(new ZodBody(z.object({
+      supplied: z.array(z.object({
+        itemId: z.string().uuid(),
+        qty: z.number().int().min(0).max(999),
+      })).min(1).max(100),
+    })))
+    dto: any,
+  ) {
+    return this.ops.repriceForStock(tenant.id, id, dto.supplied, `vendor:${user.id}`);
+  }
+
   /** A vendor answering a review in public. */
   @Post('reviews/:id/reply')
   reply(

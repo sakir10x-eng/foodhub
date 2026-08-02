@@ -231,6 +231,10 @@ export interface OrderDto {
   items: OrderItemDto[];
   deliveryAddress: {
     name: string;
+    /** What the door is next to. In a village this is the address. */
+    landmark?: string;
+    /** The customer asked to be rung before the rider arrives. */
+    callBefore?: boolean;
     phone: string;
     addressLine: string;
     area: string;
