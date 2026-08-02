@@ -20,7 +20,7 @@ import { TenantContext } from '../src/common/tenant-context';
  */
 describe('the area job pool', () => {
   const prisma = new PrismaService();
-  const ops = new OpsService(prisma, new CacheService(new ConfigService({})));
+  const ops = new OpsService(prisma, new CacheService(new ConfigService({})), {} as any);
 
   let shop: string;
   let rakib: string;
@@ -42,7 +42,7 @@ describe('the area job pool', () => {
         deliveryFee: 6_000,
         total: 46_000,
         dueOnDelivery: 46_000,
-        deliveryAddress: address,
+        deliveryAddress: address as any,
       },
     });
 

@@ -6,7 +6,9 @@ import {
   estimateEta,
   etaClock,
   isFixFresh,
+  riderCoordsVisible,
   riderVisibleFor,
+  type TripPosition,
   OrderDto,
   OrderStatus,
   RiderPin,
@@ -28,6 +30,12 @@ const ORDER_INCLUDE = {
   // Who is carrying it and where they are. Whether any of that reaches the customer is
   // decided in `riderPin` below, not here.
   rider: { select: { name: true, phone: true, lat: true, lng: true, locationAt: true } },
+  // Where this delivery sits in the rider's run. Four columns, and they are what stop a
+  // batched rider's position being broadcast from somebody else's gate — see `riderPin`.
+  tripStops: {
+    where: { kind: 'DROP' as const },
+    select: { seq: true, completedAt: true, trip: { select: { status: true, activeSeq: true } } },
+  },
 } satisfies Prisma.OrderInclude;
 
 export interface OrderListQuery {
@@ -364,26 +372,52 @@ function etaFields(order: any): { etaAt?: { earliest: string; latest: string } |
 }
 
 /**
+ * Where this customer sits in the rider's run, if the rider is on one.
+ *
+ * `stopsAhead` is 0 when the rider is coming here next. Null means there is no run at all
+ * — an order handed to somebody before trips existed, or one carried on its own.
+ */
+function tripPosition(order: any): TripPosition | null {
+  const stop = order.tripStops?.[0];
+  if (!stop?.trip || stop.trip.status !== 'ACTIVE' || stop.completedAt) return null;
+  return {
+    stopsAhead: Math.max(0, stop.seq - stop.trip.activeSeq),
+    isActiveStop: stop.seq === stop.trip.activeSeq,
+  };
+}
+
+/**
  * What the customer is told about the rider — which is nothing at all unless the food is
  * genuinely on its way to them.
  *
  * The name and phone appear as soon as the order is out for delivery, because a customer
- * standing at a locked gate needs to be able to ring somebody. The POSITION is held to a
- * stricter test: it also has to be recent. A stale fix is dropped rather than shown, so
- * the map can say "no live position" instead of drawing a rider who has not moved in
- * twenty minutes and letting the customer draw their own wrong conclusion.
+ * standing at a locked gate needs to be able to ring somebody. The POSITION is held to two
+ * stricter tests:
+ *
+ *   - it has to be **recent**. A stale fix is dropped rather than shown, so the map can
+ *     say "no live position" instead of drawing a rider who has not moved in twenty
+ *     minutes and letting the customer draw their own wrong conclusion.
+ *   - the rider has to be coming **here**. On a batched run, ON_THE_WAY covers three
+ *     customers at once, and drawing the rider for all of them would park a dot outside
+ *     the first one's gate for the other two to watch — which is precisely the leak that
+ *     kept READY out of this function in the first place. `riderCoordsVisible` holds that
+ *     line; the queue position is what the other two get instead, and it is more use to
+ *     them than a map of a stranger's street.
  */
 function riderPin(order: any): RiderPin | null {
   const rider = order.rider;
   if (!rider || !riderVisibleFor(order.status)) return null;
 
-  const fresh = isFixFresh(rider.locationAt);
+  const position = tripPosition(order);
+  const show = riderCoordsVisible(order.status, position) && isFixFresh(rider.locationAt);
+
   return {
     name: rider.name,
     phone: rider.phone,
-    lat: fresh ? rider.lat : null,
-    lng: fresh ? rider.lng : null,
-    locationAt: fresh ? rider.locationAt.toISOString() : null,
+    lat: show ? rider.lat : null,
+    lng: show ? rider.lng : null,
+    locationAt: show ? rider.locationAt.toISOString() : null,
+    stopsAhead: position ? position.stopsAhead : null,
   };
 }
 

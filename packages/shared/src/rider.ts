@@ -55,4 +55,13 @@ export interface RiderPin {
   lng: number | null;
   /** ISO. Absent when the last fix has gone stale. */
   locationAt: string | null;
+  /**
+   * How many stops the rider has before this one, on a batched run. 0 = coming here next,
+   * null = not on a run at all.
+   *
+   * This is what a customer gets instead of a map while it is somebody else's turn — a
+   * truthful, useful number in place of a dot parked outside a stranger's house. See
+   * `riderCoordsVisible` in trip.ts.
+   */
+  stopsAhead?: number | null;
 }

@@ -546,6 +546,7 @@ model Rider {
   shops     RiderShop[]
   areas     RiderArea[]
   skips     RiderOfferSkip[]
+  trips     Trip[]
   orders    Order[]
   createdAt DateTime @default(now())
 
@@ -572,6 +573,74 @@ model RiderArea {
 
   @@index([riderId])
   @@map("rider_areas")
+}
+
+enum TripStatus {
+  PLANNED
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum StopKind {
+  PICKUP
+  DROP
+}
+
+/// One run: several shops collected, several houses visited, one rider.
+///
+/// A village cannot pay for one-order-one-trip — the houses are too far apart and the
+/// orders too few. This is the model that makes a shared rider economic, and it is also
+/// what lets a customer be told "third stop" instead of being shown a rider parked outside
+/// a stranger's gate.
+model Trip {
+  id      String     @id @default(uuid()) @db.Uuid
+  riderId String     @db.Uuid
+  rider   Rider      @relation(fields: [riderId], references: [id], onDelete: Cascade)
+  status  TripStatus @default(PLANNED)
+
+  /// The `seq` of the stop the rider is travelling to right now.
+  ///
+  /// Denormalised, and written by **`advanceTrip()` only**. The customer's tracker asks
+  /// "is the rider coming to me next" on every poll, and answering that by counting
+  /// unfinished stops would hang a subquery off every order read in the system. One
+  /// integer with one writer is the cheaper honesty.
+  activeSeq Int @default(0)
+
+  stops       TripStop[]
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([riderId, status])
+  @@map("trips")
+}
+
+/// A place the rider has to be, and why.
+model TripStop {
+  id     String @id @default(uuid()) @db.Uuid
+  tripId String @db.Uuid
+  trip   Trip   @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  /// Position in the run. Gaps are fine; only the order matters.
+  seq  Int
+  kind StopKind
+
+  orderId String @db.Uuid
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  /// Which shop this order belongs to — carried on the drop as well as the pickup.
+  ///
+  /// Redundant with the order, and worth it: every read of a stop has to enter that shop's
+  /// tenant scope before it may touch the order at all, so keeping it here is what stops
+  /// the run sheet needing a cross-tenant lookup to find out where it is allowed to look.
+  tenantId String @db.Uuid
+
+  completedAt DateTime?
+
+  @@unique([tripId, seq])
+  @@unique([tripId, orderId, kind])
+  @@index([orderId])
+  @@map("trip_stops")
 }
 
 /// A delivery this rider has passed on.
@@ -883,6 +952,17 @@ model Order {
   rider   Rider?  @relation(fields: [riderId], references: [id], onDelete: SetNull)
   /// Riders who have passed on this one; it stays available to everybody else.
   riderSkips RiderOfferSkip[]
+  /// Its place in a rider's run — one PICKUP at the shop, one DROP at the door.
+  tripStops  TripStop[]
+
+  /// When the rider actually took it off the counter.
+  ///
+  /// Recorded here rather than as a new OrderStatus. "Collected" and "on the way" are the
+  /// same fact to a customer, and a status costs nine wiring points — the state machine,
+  /// the labels, the happy path, the badge, the ticket, the tracker — every one of which
+  /// is a place to be silently inconsistent. A timestamp and an OrderEvent say it without
+  /// any of that.
+  pickedUpAt DateTime?
 
   /// When the customer asked for it. Null means as soon as possible.
   ///

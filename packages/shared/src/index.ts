@@ -6,6 +6,7 @@ export * from './cuisines';
 export * from './rider';
 export * from './pricing';
 export * from './rider-area';
+export * from './trip';
 export * from './plans';
 export * from './schemas';
 export * from './api-types';

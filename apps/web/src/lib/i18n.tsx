@@ -72,6 +72,10 @@ const en = {
   'rider.onTheWay': 'On the way to you',
   'rider.away': '{km} km away',
   'rider.noFix': 'On the way — no live position right now',
+  // Said instead of "no live position" when the rider is simply not here yet. The
+  // difference matters: one sounds like a fault, the other is the truth.
+  'rider.queuedOne': 'On the way — one more stop before yours',
+  'rider.queued': 'On the way — {n} stops before yours',
   'rider.updated': 'updated {ago}',
   'rider.justNow': 'just now',
   'rider.minutesAgo': '{n} min ago',
@@ -130,6 +134,8 @@ const bn: Partial<Record<Key, string>> = {
   'rider.onTheWay': 'আপনার দিকে আসছে',
   'rider.away': '{km} কিমি দূরে',
   'rider.noFix': 'পথে আছে — এই মুহূর্তে লাইভ অবস্থান নেই',
+  'rider.queuedOne': 'পথে আছে — আপনার আগে আর একটি ডেলিভারি',
+  'rider.queued': 'পথে আছে — আপনার আগে আরও {n}টি ডেলিভারি',
   'rider.updated': '{ago} আপডেট',
   'rider.justNow': 'এইমাত্র',
   'rider.minutesAgo': '{n} মিনিট আগে',

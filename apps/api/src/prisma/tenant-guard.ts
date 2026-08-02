@@ -37,6 +37,13 @@ export const UNGUARDED_MODELS = new Set([
   // RiderShop by hand, and rider-isolation.spec.ts is what proves it still does.
   'Rider',
   'RiderShop', // reached via riderId/tenantId, both filtered explicitly at every use
+  'RiderArea', // reached via riderId, and the rider is resolved from their own token
+  'RiderOfferSkip', // reached via riderId
+  // A trip belongs to a rider and crosses shops by design — that is the whole point of it.
+  // Its stops are reached through an Order, which IS guarded, or through the rider's own
+  // token; ops.service.ts resolves the owning shop before every write either way.
+  'Trip',
+  'TripStop',
   'RefreshToken', // reached via userId
   'SavedAddress', // reached via userId
   'OrderItem', // reached via orderId, which is guarded

@@ -23,7 +23,7 @@ import { TenantContext } from '../src/common/tenant-context';
  */
 describe('rider isolation between shops', () => {
   const prisma = new PrismaService();
-  const ops = new OpsService(prisma, new CacheService(new ConfigService({})));
+  const ops = new OpsService(prisma, new CacheService(new ConfigService({})), {} as any);
 
   let alpha: string;
   let beta: string;

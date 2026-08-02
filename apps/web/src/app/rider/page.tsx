@@ -119,23 +119,190 @@ function RunSheet() {
 
       <LocationSharing token={token} />
 
-      <h2 className="mt-6 px-1 text-xs font-bold uppercase tracking-wide text-ink-faint">
-        Carrying now
-      </h2>
-      {queue.orders.length === 0 ? (
-        <p className="mt-2 rounded-2xl bg-surface-edge px-4 py-10 text-center text-sm text-ink-muted">
-          Nothing to deliver right now.
-        </p>
-      ) : (
-        <ul className="mt-2 space-y-3">
-          {queue.orders.map((order) => (
-            <li key={order.id}>
-              <Drop order={order} />
-            </li>
-          ))}
-        </ul>
+      <Run token={token} />
+
+      {queue.orders.length > 0 && (
+        <>
+          <h2 className="mt-6 px-1 text-xs font-bold uppercase tracking-wide text-ink-faint">
+            Carrying now
+          </h2>
+          <ul className="mt-2 space-y-3">
+            {queue.orders.map((order) => (
+              <li key={order.id}>
+                <Drop order={order} />
+              </li>
+            ))}
+          </ul>
+        </>
       )}
     </AppShell>
+  );
+}
+
+interface Stop {
+  id: string;
+  seq: number;
+  kind: 'PICKUP' | 'DROP';
+  done: boolean;
+  active: boolean;
+  code: string;
+  status: string;
+  store: string;
+  address: string | null;
+  phone: string;
+  deliveryAddress: RiderOrder['deliveryAddress'] | null;
+  dueOnDelivery: number;
+}
+
+/**
+ * The run: every counter and every door, in the order they should be visited.
+ *
+ * Only the **next** stop can be acted on. That is not a UI simplification — a rider who
+ * can tick the third drop from the first one's gate leaves two customers whose tracker
+ * says delivered and whose food is still in the bag. The rest of the list is there to be
+ * read, not tapped, so the rider knows what is coming.
+ */
+function Run({ token }: { token: string }) {
+  const [trip, setTrip] = useState<{ id: string; status: string; remaining: number } | null>(null);
+  const [stops, setStops] = useState<Stop[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const apply = (res: { trip: any; stops: Stop[] }) => {
+    setTrip(res.trip);
+    setStops(res.stops);
+  };
+
+  const load = useCallback(async () => {
+    try {
+      apply(await clientApi('/rider/trip', { method: 'POST', body: JSON.stringify({ token }) }));
+    } catch {
+      /* one failed poll is a tunnel */
+    }
+  }, [token]);
+
+  useEffect(() => {
+    void load();
+    const timer = setInterval(load, 30_000);
+    return () => clearInterval(timer);
+  }, [load]);
+
+  const call = async (path: 'trip/plan' | 'trip/stop', body: Record<string, unknown>) => {
+    setBusy(path);
+    setError(null);
+    try {
+      apply(await clientApi(`/rider/${path}`, { method: 'POST', body: JSON.stringify({ token, ...body }) }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'That did not go through.');
+      await load();
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  if (!trip || stops.length === 0) return null;
+  const active = stops.find((s) => s.active);
+
+  return (
+    <section className="mt-6">
+      <div className="flex items-baseline justify-between gap-2 px-1">
+        <h2 className="text-xs font-bold uppercase tracking-wide text-ink-faint">Your run</h2>
+        <span className="text-xs text-ink-faint">{trip.remaining} left</span>
+      </div>
+
+      {trip.status === 'PLANNED' && (
+        <button
+          type="button"
+          onClick={() => call('trip/plan', {})}
+          disabled={busy !== null}
+          className="mt-2 w-full rounded-full bg-brand px-4 py-3 text-sm font-bold text-white disabled:opacity-60"
+        >
+          Sort my route and start
+        </button>
+      )}
+
+      {error && (
+        <p role="alert" className="mt-2 rounded-xl bg-amber-50 px-3 py-2 text-sm text-amber-800">
+          {error}
+        </p>
+      )}
+
+      <ol className="mt-2 space-y-2">
+        {stops.map((stop) => {
+          const addr = stop.deliveryAddress ?? {};
+          const maps =
+            stop.kind === 'DROP' && typeof addr.lat === 'number' && typeof addr.lng === 'number'
+              ? `https://maps.google.com/?q=${addr.lat},${addr.lng}`
+              : null;
+
+          return (
+            <li
+              key={stop.id}
+              className={`card p-4 ${stop.done ? 'opacity-50' : ''} ${
+                stop.active ? 'border-brand ring-1 ring-brand' : ''
+              }`}
+            >
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="text-[11px] font-bold uppercase tracking-wide text-ink-faint">
+                  {stop.kind === 'PICKUP' ? 'Collect' : 'Deliver'} · {stop.code}
+                </span>
+                {stop.done && <span className="text-[11px] font-bold text-emerald-700">Done ✓</span>}
+              </div>
+
+              <p className="mt-1 flex items-center gap-1.5 text-[15px] font-bold">
+                <Icon name="pin" size={14} />
+                {stop.kind === 'PICKUP' ? stop.store : addr.addressLine || addr.area || '—'}
+              </p>
+              {stop.kind === 'PICKUP'
+                ? stop.address && <p className="text-sm text-ink-muted">{stop.address}</p>
+                : addr.area && <p className="text-sm text-ink-muted">{addr.area}</p>}
+              {stop.kind === 'DROP' && addr.note && (
+                <p className="mt-1 text-sm text-ink-muted">“{addr.note}”</p>
+              )}
+
+              {stop.kind === 'DROP' && (
+                <p
+                  className={`mt-2 text-xl font-extrabold tabular-nums ${
+                    stop.dueOnDelivery > 0 ? 'text-ink' : 'text-emerald-700'
+                  }`}
+                >
+                  {stop.dueOnDelivery > 0 ? formatBDT(stop.dueOnDelivery) : 'Paid — collect nothing'}
+                </p>
+              )}
+
+              {!stop.done && (
+                <div className="mt-3 flex gap-2">
+                  <a href={`tel:${stop.phone}`} className="btn-ghost justify-center gap-1.5 px-4">
+                    <Icon name="phone" size={15} />
+                    Call
+                  </a>
+                  {maps && (
+                    <a href={maps} target="_blank" rel="noreferrer" className="btn-ghost justify-center gap-1.5 px-4">
+                      <Icon name="pin" size={15} />
+                      Go
+                    </a>
+                  )}
+                  {stop.active && (
+                    <button
+                      type="button"
+                      onClick={() => call('trip/stop', { stopId: stop.id })}
+                      disabled={busy !== null}
+                      className="flex-1 rounded-full bg-brand px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60"
+                    >
+                      {stop.kind === 'PICKUP' ? 'Got it' : 'Delivered'}
+                    </button>
+                  )}
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+
+      {!active && trip.remaining > 0 && (
+        <p className="mt-2 px-1 text-xs text-ink-faint">Tap “Sort my route and start” to begin.</p>
+      )}
+    </section>
   );
 }
 

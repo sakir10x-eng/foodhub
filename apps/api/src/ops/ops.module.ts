@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { bdPhone, riderLocationSchema, type RiderLocationInput } from '@foodhub/shared';
 import { OpsService } from './ops.service';
 import { ReviewsModule } from '../reviews/reviews.module';
+import { OrdersModule } from '../orders/orders.module';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
 import { ReviewsService } from '../reviews/reviews.service';
 import { ZodBody } from '../common/zod.pipe';
@@ -204,6 +205,32 @@ class RiderController {
     return this.ops.skipWork(dto.token, dto.orderId);
   }
 
+  /** The run: every counter and every door, in order, with the next one marked. */
+  @Public()
+  @PlatformScope('a rider reads its own run against its own run-sheet token')
+  @Post('trip')
+  trip(@Body(new ZodBody(z.object({ token: z.string().min(1) }))) dto: any) {
+    return this.ops.tripSheet(dto.token);
+  }
+
+  /** Sort what is still ahead and start riding. Completed stops are never reordered. */
+  @Public()
+  @PlatformScope('a rider plans its own run against its own run-sheet token')
+  @Post('trip/plan')
+  planTrip(@Body(new ZodBody(z.object({ token: z.string().min(1) }))) dto: any) {
+    return this.ops.planTrip(dto.token);
+  }
+
+  /** Collected at a counter, or handed over at a door. */
+  @Public()
+  @PlatformScope('a rider completes a stop on its own run against its own run-sheet token')
+  @Post('trip/stop')
+  completeStop(
+    @Body(new ZodBody(z.object({ token: z.string().min(1), stopId: z.string().uuid() }))) dto: any,
+  ) {
+    return this.ops.completeStop(dto.token, dto.stopId);
+  }
+
   @Public()
   @PlatformScope('a rider answers an invitation against its own run-sheet token')
   @Post('invites')
@@ -220,7 +247,9 @@ class RiderController {
 }
 
 @Module({
-  imports: [ReviewsModule],
+  // OrdersModule for OrdersService: a rider completing a drop must move the order through
+  // the same code a vendor does, or DELIVERED would skip settlement and loyalty.
+  imports: [ReviewsModule, OrdersModule],
   controllers: [VendorOpsController, RiderController],
   providers: [OpsService],
   exports: [OpsService],

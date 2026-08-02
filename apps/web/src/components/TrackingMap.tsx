@@ -52,7 +52,17 @@ export function TrackingMap({
           </span>
           <div className="min-w-0">
             <p className="font-semibold">{rider.name}</p>
-            <p className="text-[13px] text-ink-muted">{t('rider.noFix')}</p>
+            {/* Two different silences, and they must not read the same. No position at all
+                is a gap in what we know; a queue position is the rider being somewhere
+                else on purpose, which is information the customer can actually use — and
+                which is all they get, because the rider is at another customer's gate. */}
+            <p className="text-[13px] text-ink-muted">
+              {typeof rider.stopsAhead === 'number' && rider.stopsAhead > 0
+                ? rider.stopsAhead === 1
+                  ? t('rider.queuedOne')
+                  : t('rider.queued', { n: localiseDigits(String(rider.stopsAhead), locale) })
+                : t('rider.noFix')}
+            </p>
           </div>
           <a href={`tel:${rider.phone}`} className="btn-ghost ml-auto shrink-0 gap-1.5 px-3 py-2">
             <Icon name="phone" size={14} />

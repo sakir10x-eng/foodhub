@@ -42,7 +42,7 @@ describe('rider tracking rules', () => {
 
 describe('rider position, end to end', () => {
   const prisma = new PrismaService();
-  const ops = new OpsService(prisma, new CacheService(new ConfigService({})));
+  const ops = new OpsService(prisma, new CacheService(new ConfigService({})), {} as any);
   const orders = new OrdersService(
     prisma,
     new LedgerService(prisma),

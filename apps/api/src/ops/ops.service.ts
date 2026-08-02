@@ -9,13 +9,17 @@ import { Cron } from '@nestjs/schedule';
 import { randomBytes } from 'node:crypto';
 import {
   RIDER_FIX_MAX_ACCURACY_M,
+  planStops,
   riderCoversDelivery,
   type DeliveryTarget,
+  type GeoPoint,
   type GeoShape,
+  type StopKind,
 } from '@foodhub/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantContext } from '../common/tenant-context';
 import { CacheService } from '../infra/cache.service';
+import { OrdersService } from '../orders/orders.service';
 
 export interface OpeningHour {
   /** 0 = Sunday. Bangladesh's week starts on Sunday, and so does this. */
@@ -38,6 +42,10 @@ export class OpsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly cache: CacheService,
+    // Injected rather than reimplemented: DELIVERED is where settlement, loyalty and the
+    // customer's text all hang off, and a rider marking a drop done must take exactly the
+    // same path a vendor does. See completeStop.
+    private readonly orders: OrdersService,
   ) {}
 
   /* ────────────────────────────────────────────────── opening hours */
@@ -269,6 +277,10 @@ export class OpsService {
     }
 
     await this.prisma.db.order.update({ where: { id: orderId }, data: { riderId } });
+
+    // A shop handing work out by name puts it on the same run as work the rider took
+    // themselves. Two lists for one afternoon is how a parcel gets left at a counter.
+    if (riderId) await this.addToTrip(riderId, tenantId, orderId);
     return { ok: true };
   }
 
@@ -276,7 +288,7 @@ export class OpsService {
   private async riderByToken(token: string) {
     const rider = await this.prisma.db.rider.findUnique({
       where: { token },
-      select: { id: true, name: true, isActive: true, onDuty: true },
+      select: { id: true, name: true, isActive: true, onDuty: true, lat: true, lng: true },
     });
     if (!rider || !rider.isActive) throw new NotFoundException('This delivery link is no longer valid');
     return rider;
@@ -484,6 +496,7 @@ export class OpsService {
     );
     if (claimed.count === 0) throw new ConflictException('Someone else has taken this delivery');
 
+    await this.addToTrip(rider.id, tenantId, orderId);
     return { ok: true };
   }
 
@@ -498,6 +511,314 @@ export class OpsService {
       update: {},
     });
     return { ok: true };
+  }
+
+  /* ─────────────────────────────────────────────────────────────────────────── the run */
+
+  /**
+   * Put an order into the rider's open run, creating one if they have none.
+   *
+   * Two stops go in together — the counter and the door — because a parcel that is only
+   * half on the plan is a parcel the rider drives past. A run that has already started
+   * still accepts new work: in a village a rider is routinely asked to grab one more thing
+   * while they are out, and refusing that would send them back to the shop for nothing.
+   */
+  private async addToTrip(riderId: string, tenantId: string, orderId: string) {
+    const trip =
+      (await this.prisma.db.trip.findFirst({
+        where: { riderId, status: { in: ['PLANNED', 'ACTIVE'] } },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true },
+      })) ?? (await this.prisma.db.trip.create({ data: { riderId }, select: { id: true } }));
+
+    const last = await this.prisma.db.tripStop.findFirst({
+      where: { tripId: trip.id },
+      orderBy: { seq: 'desc' },
+      select: { seq: true },
+    });
+    const base = (last?.seq ?? -1) + 1;
+
+    // Appended in arrival order and left there. Re-sorting happens in `replanTrip`, which
+    // the rider triggers — a plan that silently rearranges itself while somebody is riding
+    // to a place is worse than a plan that is merely imperfect.
+    await this.prisma.db.tripStop.createMany({
+      data: [
+        { tripId: trip.id, seq: base, kind: 'PICKUP', orderId, tenantId },
+        { tripId: trip.id, seq: base + 1, kind: 'DROP', orderId, tenantId },
+      ],
+      skipDuplicates: true,
+    });
+
+    await this.advanceTrip(trip.id);
+    return trip.id;
+  }
+
+  /**
+   * Move the trip's pointer to the first stop that is still outstanding.
+   *
+   * The **only** writer of `Trip.activeSeq`, which is what the customer's tracker reads to
+   * decide whether the rider is coming to them or to somebody else. Every path that
+   * completes, adds or reorders a stop ends here, and a second writer appearing anywhere
+   * else would make that field a guess.
+   */
+  private async advanceTrip(tripId: string) {
+    const next = await this.prisma.db.tripStop.findFirst({
+      where: { tripId, completedAt: null },
+      orderBy: { seq: 'asc' },
+      select: { seq: true },
+    });
+
+    if (!next) {
+      await this.prisma.db.trip.updateMany({
+        where: { id: tripId, status: { in: ['PLANNED', 'ACTIVE'] } },
+        data: { status: 'COMPLETED', completedAt: new Date() },
+      });
+      return;
+    }
+    await this.prisma.db.trip.update({ where: { id: tripId }, data: { activeSeq: next.seq } });
+  }
+
+  /**
+   * Sort the outstanding stops into a sensible order and start riding.
+   *
+   * Completed stops are never touched: they are a record of where somebody has already
+   * been, and rewriting history to make a plan tidier would break the one thing a run
+   * sheet is for. Only what is still ahead gets reordered.
+   */
+  async planTrip(token: string) {
+    const rider = await this.riderByToken(token);
+    const trip = await this.openTrip(rider.id);
+    if (!trip) throw new NotFoundException('You have no deliveries to plan');
+
+    const stops = await this.prisma.db.tripStop.findMany({
+      where: { tripId: trip.id },
+      orderBy: { seq: 'asc' },
+      select: { id: true, seq: true, kind: true, orderId: true, tenantId: true, completedAt: true },
+    });
+
+    const done = stops.filter((s) => s.completedAt);
+    const todo = stops.filter((s) => !s.completedAt);
+    if (todo.length === 0) throw new BadRequestException('Every stop on this run is done');
+
+    const points = await this.stopPoints(todo);
+    const planned = planStops(
+      todo.map((stop) => ({
+        orderId: stop.orderId,
+        kind: stop.kind as StopKind,
+        tenantId: stop.tenantId,
+        point: points.get(stop.id)?.point ?? null,
+        placedAt: points.get(stop.id)?.placedAt ?? 0,
+      })),
+      riderPoint(rider),
+    );
+
+    // Matched back by (orderId, kind), the pair that is unique on a trip.
+    const key = (s: { orderId: string; kind: string }) => `${s.orderId}:${s.kind}`;
+    const rank = new Map(planned.map((s, index) => [key(s), index]));
+    const resequenced = [...todo].sort((a, b) => (rank.get(key(a)) ?? 0) - (rank.get(key(b)) ?? 0));
+
+    // Two passes into a scratch range: `(tripId, seq)` is unique, so writing the new
+    // numbers directly would collide with the old ones halfway through.
+    const offset = (done.length + todo.length) * 10 + 1000;
+    await this.prisma.db.$transaction([
+      ...resequenced.map((stop, index) =>
+        this.prisma.db.tripStop.update({ where: { id: stop.id }, data: { seq: offset + index } }),
+      ),
+      ...resequenced.map((stop, index) =>
+        this.prisma.db.tripStop.update({ where: { id: stop.id }, data: { seq: done.length + index } }),
+      ),
+      this.prisma.db.trip.update({
+        where: { id: trip.id },
+        data: { status: 'ACTIVE', startedAt: trip.startedAt ?? new Date() },
+      }),
+    ]);
+
+    await this.advanceTrip(trip.id);
+    return this.tripSheet(token);
+  }
+
+  /** Where each stop is, and when its order was placed. */
+  private async stopPoints(stops: { id: string; kind: string; orderId: string; tenantId: string }[]) {
+    const out = new Map<string, { point: { lat: number; lng: number } | null; placedAt: number }>();
+
+    for (const stop of stops) {
+      const { tenantId } = stop;
+      await TenantContext.runAsTenant(tenantId, async () => {
+        const order = await this.prisma.db.order.findUnique({
+          where: { id: stop.orderId },
+          select: { deliveryAddress: true, placedAt: true },
+        });
+        if (!order) return;
+
+        if (stop.kind === 'PICKUP') {
+          const shop = await this.prisma.db.tenant.findUnique({
+            where: { id: tenantId },
+            select: { lat: true, lng: true },
+          });
+          out.set(stop.id, {
+            point: shop?.lat != null && shop?.lng != null ? { lat: shop.lat, lng: shop.lng } : null,
+            placedAt: order.placedAt.getTime(),
+          });
+        } else {
+          out.set(stop.id, {
+            point: addressTarget(order.deliveryAddress).point ?? null,
+            placedAt: order.placedAt.getTime(),
+          });
+        }
+      });
+    }
+    return out;
+  }
+
+  /**
+   * The rider marking a stop done — collected at a counter, or handed over at a door.
+   *
+   * The order's status is moved through **`OrdersService.updateStatus`**, never by writing
+   * the column here. DELIVERED is where settlement posts, loyalty points are awarded and
+   * the customer is texted; a second path that only set `status` would look right on the
+   * screen and quietly skip the money. The one thing written directly is `pickedUpAt`,
+   * which no other code owns.
+   */
+  async completeStop(token: string, stopId: string) {
+    const rider = await this.riderByToken(token);
+
+    const stop = await this.prisma.db.tripStop.findUnique({
+      where: { id: stopId },
+      select: {
+        id: true, kind: true, orderId: true, tenantId: true, completedAt: true, tripId: true,
+        trip: { select: { riderId: true, status: true } },
+      },
+    });
+    // Stop ids arrive from a phone, so the owning rider is checked rather than assumed.
+    if (!stop || stop.trip.riderId !== rider.id) throw new NotFoundException('That stop is not on your run');
+    if (stop.completedAt) return this.tripSheet(token);
+
+    // Out of order is refused. A rider who marks the third drop done from the first one's
+    // gate leaves two customers whose tracker says delivered and whose food is in a bag.
+    const earlier = await this.prisma.db.tripStop.findFirst({
+      where: { tripId: stop.tripId, completedAt: null, seq: { lt: await this.seqOf(stop.id) } },
+      select: { id: true },
+    });
+    if (earlier) throw new BadRequestException('Finish the stop before this one first');
+
+    if (stop.kind === 'PICKUP') {
+      await TenantContext.runAsTenant(stop.tenantId, async () => {
+        const order = await this.prisma.db.order.findUnique({
+          where: { id: stop.orderId },
+          select: { status: true },
+        });
+        if (!order) throw new NotFoundException('Order not found');
+        // Nothing may be collected before the kitchen says it is ready — a rider who takes
+        // a bag that is not packed is the origin of half of all missing-item complaints.
+        if (order.status === 'CONFIRMED' || order.status === 'PREPARING') {
+          throw new BadRequestException('This one is not ready yet');
+        }
+        await this.prisma.db.order.update({
+          where: { id: stop.orderId },
+          data: { pickedUpAt: new Date() },
+        });
+      });
+
+      // READY → ON_THE_WAY. Already on the way (a second parcel from the same counter on a
+      // started run) is not an error, so the illegal transition is simply not attempted.
+      const current = await TenantContext.runAsTenant(stop.tenantId, () =>
+        this.prisma.db.order.findUnique({ where: { id: stop.orderId }, select: { status: true } }),
+      );
+      if (current?.status === 'READY') {
+        await TenantContext.runAsTenant(stop.tenantId, () =>
+          this.orders.updateStatus(stop.orderId, 'ON_THE_WAY', `rider:${rider.id}`, 'Collected by the rider'),
+        );
+      }
+    } else {
+      await TenantContext.runAsTenant(stop.tenantId, () =>
+        this.orders.updateStatus(stop.orderId, 'DELIVERED', `rider:${rider.id}`, 'Handed over by the rider'),
+      );
+    }
+
+    await this.prisma.db.tripStop.update({ where: { id: stop.id }, data: { completedAt: new Date() } });
+    await this.advanceTrip(stop.tripId);
+    return this.tripSheet(token);
+  }
+
+  private seqOf(stopId: string): Promise<number> {
+    return this.prisma.db.tripStop
+      .findUnique({ where: { id: stopId }, select: { seq: true } })
+      .then((s) => s?.seq ?? 0);
+  }
+
+  private openTrip(riderId: string) {
+    return this.prisma.db.trip.findFirst({
+      where: { riderId, status: { in: ['PLANNED', 'ACTIVE'] } },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, status: true, activeSeq: true, startedAt: true },
+    });
+  }
+
+  /**
+   * The rider's run, in order, with the next stop marked.
+   *
+   * A pickup carries the shop; a drop carries the address and the cash. The rider needs
+   * both kinds on one list — the mistake a multi-shop run invites is arriving at the right
+   * village having forgotten a counter.
+   */
+  async tripSheet(token: string) {
+    const rider = await this.riderByToken(token);
+    const trip = await this.openTrip(rider.id);
+    if (!trip) return { trip: null, stops: [] };
+
+    const stops = await this.prisma.db.tripStop.findMany({
+      where: { tripId: trip.id },
+      orderBy: { seq: 'asc' },
+      select: { id: true, seq: true, kind: true, orderId: true, tenantId: true, completedAt: true },
+    });
+
+    const detailed: TripStopView[] = [];
+    for (const stop of stops) {
+      const { tenantId } = stop;
+      const detail = await TenantContext.runAsTenant(tenantId, async () => {
+        const [order, shop] = await Promise.all([
+          this.prisma.db.order.findUnique({
+            where: { id: stop.orderId },
+            select: {
+              code: true, status: true, dueOnDelivery: true, customerPhone: true,
+              deliveryAddress: true, pickedUpAt: true,
+            },
+          }),
+          this.prisma.db.tenant.findUnique({
+            where: { id: tenantId },
+            select: { name: true, address: true, phone: true },
+          }),
+        ]);
+        return { order, shop };
+      });
+      if (!detail.order) continue;
+
+      detailed.push({
+        id: stop.id,
+        seq: stop.seq,
+        kind: stop.kind,
+        done: Boolean(stop.completedAt),
+        active: stop.seq === trip.activeSeq && !stop.completedAt,
+        code: detail.order.code,
+        status: detail.order.status,
+        store: detail.shop?.name ?? '',
+        // A pickup shows the shop's own address and phone; a drop shows the customer's.
+        // Same card, different halves of the same journey.
+        address: stop.kind === 'PICKUP' ? detail.shop?.address ?? '' : null,
+        phone: stop.kind === 'PICKUP' ? detail.shop?.phone ?? '' : detail.order.customerPhone,
+        deliveryAddress: stop.kind === 'DROP' ? detail.order.deliveryAddress : null,
+        dueOnDelivery: stop.kind === 'DROP' ? detail.order.dueOnDelivery : 0,
+      });
+    }
+
+    return {
+      trip: {
+        id: trip.id,
+        status: trip.status,
+        remaining: detailed.filter((s) => !s.done).length,
+      },
+      stops: detailed,
+    };
   }
 
   /**
@@ -625,6 +946,29 @@ export class OpsService {
 export type RiderLocationResult =
   | { accepted: false; reason: 'accuracy'; orders: 0 }
   | { accepted: true; at: string; orders: number; live: { code: string; customerPhone: string }[] };
+
+/** One line on the rider's run sheet — a counter to collect from, or a door to knock on. */
+export interface TripStopView {
+  id: string;
+  seq: number;
+  kind: StopKind;
+  done: boolean;
+  /** The one the rider is travelling to right now. */
+  active: boolean;
+  code: string;
+  status: string;
+  store: string;
+  /** The shop's address on a pickup; a drop carries `deliveryAddress` instead. */
+  address: string | null;
+  phone: string;
+  deliveryAddress: unknown;
+  dueOnDelivery: number;
+}
+
+/** The rider's own last position, when they have shared one. Used to start the route. */
+function riderPoint(rider: { lat: number | null; lng: number | null }): GeoPoint | null {
+  return rider.lat != null && rider.lng != null ? { lat: rider.lat, lng: rider.lng } : null;
+}
 
 /**
  * What we can tell the matcher about where an order is going.
