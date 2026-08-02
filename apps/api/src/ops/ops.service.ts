@@ -13,6 +13,7 @@ import {
   canCarry,
   cartWeightGrams,
   deliveryOtpMatches,
+  isAddressMatchable,
   isReductionOnly,
   planStops,
   repriceOrder,
@@ -721,6 +722,110 @@ export class OpsService {
       update: {},
     });
     return { ok: true };
+  }
+
+  /* ────────────────────────────────────────────────────────────────────── the hub view */
+
+  /**
+   * Every rider across every shop, for whoever is running the operation.
+   *
+   * Once a village has more than three or four riders the shop's own panel stops being
+   * enough: each shop sees its own corner, and nobody sees that two villages have five
+   * riders between them and a third has none.
+   *
+   * ⚠️ Called from `PlatformAdminController`, which carries `@PlatformScope`. Order reads
+   * below still enter each shop's own tenant scope one at a time rather than running wide,
+   * for the same reason the rider's own sheet does: a filter is the only thing standing
+   * between a cross-tenant query and every order in the database.
+   */
+  async hubRiders() {
+    const riders = await this.prisma.db.rider.findMany({
+      where: { isActive: true },
+      orderBy: [{ onDuty: 'desc' }, { name: 'asc' }],
+      select: {
+        id: true, name: true, phone: true, onDuty: true, dutySince: true,
+        vehicle: true, capacityKg: true, lat: true, lng: true, locationAt: true,
+        areas: { select: { label: true } },
+        shops: { where: { approved: true }, select: { tenant: { select: { name: true } } } },
+        _count: { select: { alerts: { where: { resolvedAt: null } } } },
+      },
+    });
+
+    return Promise.all(
+      riders.map(async (rider) => ({
+        id: rider.id,
+        name: rider.name,
+        phone: rider.phone,
+        onDuty: rider.onDuty,
+        dutySince: rider.dutySince,
+        vehicle: rider.vehicle,
+        capacityKg: rider.capacityKg,
+        // Position and freshness travel together. A pin with no age beside it is a pin
+        // somebody will believe long after it stopped being true.
+        lat: rider.lat,
+        lng: rider.lng,
+        locationAt: rider.locationAt,
+        areas: rider.areas.map((a) => a.label),
+        shops: rider.shops.map((s) => s.tenant.name),
+        openAlerts: rider._count.alerts,
+        ...(await this.riderLedger.balances(rider.id)),
+      })),
+    );
+  }
+
+  /**
+   * Deliveries nobody has picked up, oldest first.
+   *
+   * The single number worth watching in this whole console. An order sitting unclaimed is
+   * a customer being quietly let down, and the two reasons it happens need different
+   * answers: nobody is on duty near it, or nothing about the address can be matched to a
+   * patch at all. The second is a data problem a shop fixes by typing an area name; the
+   * first is a staffing problem. So both are reported, separately, rather than as one
+   * unhelpful total.
+   */
+  async hubUnclaimed() {
+    const tenants = await this.prisma.db.tenant.findMany({ select: { id: true, name: true } });
+
+    const rows: {
+      code: string; store: string; area: string; status: string;
+      placedAt: Date; waitingMinutes: number; matchable: boolean;
+    }[] = [];
+
+    for (const tenant of tenants) {
+      await TenantContext.runAsTenant(tenant.id, async () => {
+        const orders = await this.prisma.db.order.findMany({
+          where: {
+            riderId: null,
+            fulfillment: 'DELIVERY',
+            status: { in: ['CONFIRMED', 'PREPARING', 'READY'] },
+          },
+          orderBy: { placedAt: 'asc' },
+          take: 50,
+          select: { code: true, status: true, placedAt: true, deliveryAddress: true },
+        });
+
+        for (const order of orders) {
+          const target = addressTarget(order.deliveryAddress);
+          rows.push({
+            code: order.code,
+            store: tenant.name,
+            area: target.area ?? '',
+            status: order.status,
+            placedAt: order.placedAt,
+            waitingMinutes: Math.round((Date.now() - order.placedAt.getTime()) / 60_000),
+            matchable: isAddressMatchable(target),
+          });
+        }
+      });
+    }
+
+    rows.sort((a, b) => a.placedAt.getTime() - b.placedAt.getTime());
+    return {
+      waiting: rows.length,
+      /** Waiting AND we cannot tell whose patch it is in. A shop can fix these today. */
+      unmatchable: rows.filter((r) => !r.matchable).length,
+      orders: rows.slice(0, 50),
+    };
   }
 
   /* ──────────────────────────────────────────────────────── what the shop cannot supply */

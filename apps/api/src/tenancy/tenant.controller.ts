@@ -5,6 +5,7 @@ import { addDomainSchema, gatewayConfigSchema, smsConfigSchema, tenantSettingsSc
 import { TenantService } from './tenant.service';
 import { TenantResolverService } from './tenant-resolver.service';
 import { PlatformRevenueService } from './platform-revenue.service';
+import { OpsService } from '../ops/ops.service';
 import { ZodBody } from '../common/zod.pipe';
 import { CurrentTenant, CurrentUser, PlatformScope, Public, RequireTenant, Roles } from '../common/decorators';
 import type { AuthedUser } from '../common/decorators';
@@ -119,7 +120,22 @@ export class PlatformAdminController {
   constructor(
     private readonly tenants: TenantService,
     private readonly revenue: PlatformRevenueService,
+    // The delivery operation seen whole. Each shop's own panel shows its corner; nobody
+    // else sees that two villages have five riders and a third has none.
+    private readonly ops: OpsService,
   ) {}
+
+  /** Every rider, on duty or not, with what they are carrying and where they last were. */
+  @Get('riders')
+  hubRiders() {
+    return this.ops.hubRiders();
+  }
+
+  /** Deliveries nobody has taken. The one number worth watching here. */
+  @Get('unclaimed')
+  hubUnclaimed() {
+    return this.ops.hubUnclaimed();
+  }
 
   @Get('overview')
   overview(@Query('days') days?: string) {

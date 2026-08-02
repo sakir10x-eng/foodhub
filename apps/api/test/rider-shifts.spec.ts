@@ -231,3 +231,115 @@ describe('carrying capacity', () => {
     expect(formatWeight(2_500)).toBe('2.5 kg');
   });
 });
+
+/**
+ * The operation seen whole.
+ *
+ * Each shop's panel shows its own corner. This is the view that notices two villages have
+ * five riders between them and a third has none — and, more usefully, that an order has
+ * been sitting unclaimed because its address matches nobody's patch.
+ */
+describe('the hub view', () => {
+  const prisma = new PrismaService();
+  const riderLedger = new RiderLedgerService(prisma);
+  const orders = new OrdersService(
+    prisma,
+    new LedgerService(prisma),
+    riderLedger,
+    new LoyaltyService(prisma),
+    { enqueue: async () => undefined } as any,
+    { emitOrderUpdate: () => undefined, emitNewOrder: () => undefined } as any,
+    { settleOnDelivery: async () => undefined } as any,
+  );
+  const ops = new OpsService(prisma, new CacheService(new ConfigService({})), orders, riderLedger);
+
+  let shopA: string;
+  let shopB: string;
+
+  beforeAll(async () => {
+    await prisma.onModuleInit();
+    await prisma.truncateAll();
+
+    const [a, b] = await Promise.all([
+      prisma.unsafeRaw.tenant.create({ data: { slug: 'hub-a', name: 'Hotel A' } }),
+      prisma.unsafeRaw.tenant.create({ data: { slug: 'hub-b', name: 'Grocer B' } }),
+    ]);
+    shopA = a.id;
+    shopB = b.id;
+
+    await prisma.unsafeRaw.rider.create({
+      data: {
+        name: 'On', phone: '01700000701', token: 'hub-on', onDuty: true, dutySince: new Date(),
+        lat: 23.75, lng: 90.38, locationAt: new Date(),
+        shops: { create: [
+          { tenantId: shopA, approved: true, approvedAt: new Date() },
+          { tenantId: shopB, approved: true, approvedAt: new Date() },
+        ] },
+        areas: { create: [{ label: 'Bazar', shape: { areas: ['Bazar'] } as any }] },
+      },
+    });
+    await prisma.unsafeRaw.rider.create({
+      data: { name: 'Off', phone: '01700000702', token: 'hub-off' },
+    });
+  });
+
+  afterAll(() => prisma.onModuleDestroy());
+
+  it('lists every rider across every shop, on duty first', async () => {
+    const hub = await ops.hubRiders();
+    expect(hub.map((r) => r.name)).toEqual(['On', 'Off']);
+    expect(hub[0].shops.sort()).toEqual(['Grocer B', 'Hotel A']);
+    expect(hub[0].areas).toEqual(['Bazar']);
+  });
+
+  // A pin with no age beside it is a pin somebody will believe long after it stopped
+  // being true, so position and freshness always travel together.
+  it('carries the age of a position alongside it', async () => {
+    const hub = await ops.hubRiders();
+    expect(hub[0].lat).toBeCloseTo(23.75, 3);
+    expect(hub[0].locationAt).not.toBeNull();
+    expect(hub[1].lat).toBeNull();
+    expect(hub[1].locationAt).toBeNull();
+  });
+
+  it('counts nothing waiting when nothing is', async () => {
+    const out = await ops.hubUnclaimed();
+    expect(out).toMatchObject({ waiting: 0, unmatchable: 0 });
+  });
+
+  it('separates work nobody took from work nobody CAN take', async () => {
+    await prisma.unsafeRaw.order.create({
+      data: {
+        tenantId: shopA, code: 'FHHU001', channel: 'OWN_STORE', customerPhone: '01700000000',
+        status: 'CONFIRMED', fulfillment: 'DELIVERY',
+        subtotal: 100, deliveryFee: 0, total: 100,
+        deliveryAddress: { area: 'Bazar' } as any,
+      },
+    });
+    await prisma.unsafeRaw.order.create({
+      data: {
+        tenantId: shopB, code: 'FHHU002', channel: 'OWN_STORE', customerPhone: '01700000000',
+        status: 'READY', fulfillment: 'DELIVERY',
+        subtotal: 100, deliveryFee: 0, total: 100,
+        // No area and no pin: this one is a data problem a shop can fix today, and it must
+        // not be lumped in with "we are short of riders".
+        deliveryAddress: { addressLine: 'near the big tree' } as any,
+      },
+    });
+
+    const out = await ops.hubUnclaimed();
+    expect(out.waiting).toBe(2);
+    expect(out.unmatchable).toBe(1);
+    expect(out.orders.find((o) => o.code === 'FHHU002')!.matchable).toBe(false);
+    expect(out.orders.map((o) => o.store).sort()).toEqual(['Grocer B', 'Hotel A']);
+  });
+
+  it('stops counting an order once somebody has it', async () => {
+    const order = await prisma.unsafeRaw.order.findFirst({ where: { code: 'FHHU001' } });
+    await ops.acceptWork('hub-on', order!.id);
+
+    const out = await ops.hubUnclaimed();
+    expect(out.orders.map((o) => o.code)).not.toContain('FHHU001');
+    expect(out.waiting).toBe(1);
+  });
+});
