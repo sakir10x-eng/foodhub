@@ -124,85 +124,241 @@ export class OpsService {
   /* ───────────────────────────────────────────────────────── riders */
 
   /**
-   * A vendor's own riders.
+   * The shops a rider actually carries for.
    *
-   * `tenantId` is written out even though the guard now adds it, because this select
-   * returns `token` — and a token is a working delivery link into whichever shop's
-   * customer addresses, phone numbers and cash amounts the rider is carrying. A filter
-   * that only exists in one layer is one refactor away from not existing.
+   * `Rider` and `RiderShop` are outside the tenant guard (see UNGUARDED_MODELS), so this
+   * filter is not a convenience — it is the entire access control for everything below it.
+   * Every rider read in this file goes through here or repeats it verbatim.
    */
-  listRiders(tenantId: string) {
-    return this.prisma.db.rider.findMany({
-      where: { tenantId, isActive: true },
-      orderBy: { name: 'asc' },
-      select: { id: true, name: true, phone: true, token: true },
-    });
+  private approvedShopIds(riderId: string): Promise<string[]> {
+    return this.prisma.db.riderShop
+      .findMany({ where: { riderId, approved: true }, select: { tenantId: true } })
+      .then((rows) => rows.map((r) => r.tenantId));
   }
 
+  /**
+   * The riders one shop can point at an order, plus anyone it has invited and is waiting
+   * on.
+   *
+   * A pending rider is listed by name so the vendor knows the invitation was sent, but
+   * **their token is withheld until they accept**. The token is a working delivery link
+   * into every shop that rider carries for; handing it over on the strength of knowing a
+   * phone number would rebuild the leak this model was designed to close.
+   */
+  async listRiders(tenantId: string) {
+    const links = await this.prisma.db.riderShop.findMany({
+      where: { tenantId, rider: { isActive: true } },
+      orderBy: { rider: { name: 'asc' } },
+      select: {
+        approved: true,
+        rider: { select: { id: true, name: true, phone: true, token: true } },
+      },
+    });
+
+    return links.map((link) => ({
+      id: link.rider.id,
+      name: link.rider.name,
+      phone: link.rider.phone,
+      approved: link.approved,
+      token: link.approved ? link.rider.token : null,
+    }));
+  }
+
+  /**
+   * Take on a rider.
+   *
+   * Two different things wear one button here, and the difference is the security model:
+   *
+   *   - a phone number nobody has seen before is a new person, created and approved on the
+   *     spot — there is no one to ask, and the shop vouching for them is the whole story;
+   *   - a phone number that already rides for another shop is an **invitation**. The link
+   *     is created unapproved and the rider turns it on from the sheet they already hold.
+   *
+   * Without the second case a vendor could type a rider's number, be handed their token,
+   * and read every other shop's customers off that rider's sheet.
+   */
   async addRider(tenantId: string, name: string, phone: string) {
-    return this.prisma.db.rider.create({
-      // The token is what a rider's own view is addressed by, so it is random rather than
-      // derived — a guessable one would expose every customer's address to anyone.
-      data: { tenantId, name, phone, token: randomBytes(16).toString('base64url') },
-      select: { id: true, name: true, phone: true, token: true },
+    const existing = await this.prisma.db.rider.findUnique({
+      where: { phone },
+      select: { id: true, name: true, phone: true, token: true, isActive: true },
     });
+
+    if (!existing) {
+      const rider = await this.prisma.db.rider.create({
+        // The token addresses the rider's own view, so it is random rather than derived —
+        // a guessable one would expose every customer's address to anyone.
+        data: {
+          name,
+          phone,
+          token: randomBytes(16).toString('base64url'),
+          shops: { create: { tenantId, approved: true, approvedAt: new Date() } },
+        },
+        select: { id: true, name: true, phone: true, token: true },
+      });
+      return { ...rider, approved: true, invited: false };
+    }
+
+    // A rider who left the platform entirely is not re-enrolled behind their back.
+    if (!existing.isActive) throw new BadRequestException('This rider is no longer available');
+
+    const link = await this.prisma.db.riderShop.findUnique({
+      where: { riderId_tenantId: { riderId: existing.id, tenantId } },
+      select: { approved: true },
+    });
+    if (link?.approved) throw new BadRequestException('This rider already works with you');
+    if (link) throw new BadRequestException('This rider has already been invited — waiting for them to accept');
+
+    await this.prisma.db.riderShop.create({ data: { riderId: existing.id, tenantId, approved: false } });
+    return {
+      id: existing.id,
+      name: existing.name,
+      phone: existing.phone,
+      token: null,
+      approved: false,
+      invited: true,
+    };
   }
 
-  async removeRider(tenantId: string, id: string) {
-    // Deactivated, never deleted: past orders point at this rider, and a delivery with no
-    // record of who carried it is exactly what you need on the day something goes wrong.
-    const removed = await this.prisma.db.rider.updateMany({
-      where: { id, tenantId },
-      data: { isActive: false },
-    });
-    // Somebody else's rider is not "already gone", it is not ours to touch — and saying so
-    // is also how the tenant-isolation test can tell a refusal from a no-op.
+  /**
+   * Stop working with a rider.
+   *
+   * This ends the relationship, not the person: the rider row survives because past orders
+   * point at it, and a delivery with no record of who carried it is exactly what you need
+   * on the day something goes wrong. They may also still be riding for three other shops,
+   * none of whose business this is.
+   */
+  async removeRider(tenantId: string, riderId: string) {
+    const removed = await this.prisma.db.riderShop.deleteMany({ where: { riderId, tenantId } });
     if (removed.count === 0) throw new NotFoundException('Rider not found');
+
+    // Their sheet must not keep showing this shop's deliveries after they have been let
+    // go. Unassigning is the guarded-client write, so it cannot reach another shop's rows.
+    await TenantContext.runAsTenant(tenantId, () =>
+      this.prisma.db.order.updateMany({
+        where: { riderId, status: { notIn: ['DELIVERED', 'CANCELLED', 'REFUNDED'] } },
+        data: { riderId: null },
+      }),
+    );
     return { ok: true };
   }
 
-  async assignRider(orderId: string, riderId: string | null) {
+  async assignRider(tenantId: string, orderId: string, riderId: string | null) {
     const order = await this.prisma.db.order.findUnique({ where: { id: orderId }, select: { id: true } });
     if (!order) throw new NotFoundException('Order not found');
 
-    // The order is guarded, but `riderId` arrives from the client and nothing here had
-    // ever checked it: a vendor could hand their delivery to another shop's rider, who
-    // would then see this shop's customer on their run sheet. Resolving the rider through
-    // the guarded client is the check — a foreign id simply finds no row.
+    // `riderId` arrives from the client, and riders are no longer filtered by the guard —
+    // so this check is the only thing stopping a shop handing its delivery to a rider who
+    // does not work for them, whose sheet would then show this shop's customer.
     if (riderId) {
-      const rider = await this.prisma.db.rider.findUnique({
-        where: { id: riderId },
-        select: { id: true, isActive: true },
+      const link = await this.prisma.db.riderShop.findUnique({
+        where: { riderId_tenantId: { riderId, tenantId } },
+        select: { approved: true, rider: { select: { isActive: true } } },
       });
-      if (!rider || !rider.isActive) throw new NotFoundException('Rider not found');
+      if (!link?.approved || !link.rider.isActive) throw new NotFoundException('Rider not found');
     }
 
     await this.prisma.db.order.update({ where: { id: orderId }, data: { riderId } });
     return { ok: true };
   }
 
-  /** What one rider is carrying. Addressed by their token, not by a login. */
-  async riderQueue(token: string) {
-    const rider = await TenantContext.runAsPlatform('a rider view is addressed by its own token', () =>
-      this.prisma.db.rider.findUnique({
-        where: { token },
-        select: { id: true, name: true, tenantId: true, isActive: true, tenant: { select: { name: true } } },
-      }),
-    );
+  /** A rider resolved from their own link, with the shops they are cleared to carry for. */
+  private async riderByToken(token: string) {
+    const rider = await this.prisma.db.rider.findUnique({
+      where: { token },
+      select: { id: true, name: true, isActive: true },
+    });
     if (!rider || !rider.isActive) throw new NotFoundException('This delivery link is no longer valid');
+    return rider;
+  }
 
-    const orders = await TenantContext.runAsTenant(rider.tenantId, () =>
-      this.prisma.db.order.findMany({
-        where: { riderId: rider.id, status: { in: ['READY', 'ON_THE_WAY'] } },
-        orderBy: { placedAt: 'asc' },
-        select: {
-          id: true, code: true, status: true, total: true, dueOnDelivery: true,
-          deliveryAddress: true, customerPhone: true, placedAt: true,
-        },
-      }),
+  /**
+   * What one rider is carrying, across every shop they work for. Addressed by their token,
+   * not by a login.
+   *
+   * The orders are read **one shop at a time under `runAsTenant`** rather than in a single
+   * cross-tenant query. A single query would have to run in platform scope, where a
+   * `tenantId: { in: [...] }` filter is the only thing between this rider and every order
+   * in the database — one editing mistake from a total breach. A village rider works for a
+   * handful of shops, so the loop costs a handful of indexed lookups and keeps the guard
+   * switched on for each one. That trade is deliberate; do not "optimise" it into one call.
+   */
+  async riderQueue(token: string) {
+    const rider = await this.riderByToken(token);
+
+    const [shopIds, invites] = await Promise.all([
+      this.approvedShopIds(rider.id),
+      this.pendingInvites(rider.id),
+    ]);
+
+    const perShop = await Promise.all(
+      shopIds.map((tenantId) =>
+        TenantContext.runAsTenant(tenantId, async () => {
+          const [shop, orders] = await Promise.all([
+            this.prisma.db.tenant.findUnique({ where: { id: tenantId }, select: { name: true } }),
+            this.prisma.db.order.findMany({
+              where: { riderId: rider.id, status: { in: ['READY', 'ON_THE_WAY'] } },
+              orderBy: { placedAt: 'asc' },
+              select: {
+                id: true, code: true, status: true, total: true, dueOnDelivery: true,
+                deliveryAddress: true, customerPhone: true, placedAt: true,
+              },
+            }),
+          ]);
+          // The shop's name travels with each drop: a rider carrying for three shops needs
+          // to know which counter this one came from before they can pick it up.
+          return orders.map((order) => ({ ...order, store: shop?.name ?? '' }));
+        }),
+      ),
     );
 
-    return { rider: { name: rider.name, store: rider.tenant.name }, orders };
+    const orders = perShop
+      .flat()
+      .sort((a, b) => a.placedAt.getTime() - b.placedAt.getTime());
+
+    return { rider: { name: rider.name, shops: shopIds.length }, orders, invites };
+  }
+
+  /** Shops waiting on this rider to say yes. */
+  private pendingInvites(riderId: string) {
+    return this.prisma.db.riderShop
+      .findMany({
+        where: { riderId, approved: false },
+        orderBy: { createdAt: 'asc' },
+        select: { tenantId: true, tenant: { select: { name: true } } },
+      })
+      .then((rows) => rows.map((r) => ({ tenantId: r.tenantId, store: r.tenant.name })));
+  }
+
+  /**
+   * The rider answering an invitation.
+   *
+   * This is the consent step that lets a token be shared safely across shops, and it needs
+   * no login precisely because the rider is already holding the only thing that proves who
+   * they are. Declining deletes the link rather than remembering a refusal — a shop asking
+   * again next month is a normal thing to happen, not an attack to be blocked.
+   */
+  async respondToInvite(token: string, tenantId: string, accept: boolean) {
+    const rider = await this.riderByToken(token);
+
+    const link = await this.prisma.db.riderShop.findUnique({
+      where: { riderId_tenantId: { riderId: rider.id, tenantId } },
+      select: { approved: true },
+    });
+    if (!link) throw new NotFoundException('That invitation is no longer there');
+    if (link.approved) return { ok: true, approved: true };
+
+    if (!accept) {
+      await this.prisma.db.riderShop.delete({
+        where: { riderId_tenantId: { riderId: rider.id, tenantId } },
+      });
+      return { ok: true, approved: false };
+    }
+
+    await this.prisma.db.riderShop.update({
+      where: { riderId_tenantId: { riderId: rider.id, tenantId } },
+      data: { approved: true, approvedAt: new Date() },
+    });
+    return { ok: true, approved: true };
   }
 
   /**
@@ -223,12 +379,10 @@ export class OpsService {
   async reportRiderLocation(
     input: { token: string; lat: number; lng: number; accuracy?: number },
   ): Promise<RiderLocationResult> {
-    const rider = await TenantContext.runAsPlatform('a rider reports position against its own token', () =>
-      this.prisma.db.rider.findUnique({
-        where: { token: input.token },
-        select: { id: true, tenantId: true, isActive: true },
-      }),
-    );
+    const rider = await this.prisma.db.rider.findUnique({
+      where: { token: input.token },
+      select: { id: true, isActive: true },
+    });
     if (!rider || !rider.isActive) throw new NotFoundException('This delivery link is no longer valid');
 
     if (input.accuracy !== undefined && input.accuracy > RIDER_FIX_MAX_ACCURACY_M) {
@@ -238,18 +392,26 @@ export class OpsService {
     }
 
     const now = new Date();
-    const live = await TenantContext.runAsTenant(rider.tenantId, async () => {
-      await this.prisma.db.rider.update({
-        where: { id: rider.id },
-        data: { lat: input.lat, lng: input.lng, locationAt: now },
-      });
-      // Only orders actually on the road: this is both the push list and the answer to
-      // "is anyone entitled to see this fix at all".
-      return this.prisma.db.order.findMany({
-        where: { riderId: rider.id, status: 'ON_THE_WAY' },
-        select: { code: true, customerPhone: true },
-      });
+    await this.prisma.db.rider.update({
+      where: { id: rider.id },
+      data: { lat: input.lat, lng: input.lng, locationAt: now },
     });
+
+    // Only orders actually on the road, and only at shops this rider is cleared for. This
+    // is both the push list and the answer to "is anyone entitled to see this fix at all",
+    // so the approved-shop filter is doing security work, not tidiness.
+    const shopIds = await this.approvedShopIds(rider.id);
+    const perShop = await Promise.all(
+      shopIds.map((tenantId) =>
+        TenantContext.runAsTenant(tenantId, () =>
+          this.prisma.db.order.findMany({
+            where: { riderId: rider.id, status: 'ON_THE_WAY' },
+            select: { code: true, customerPhone: true },
+          }),
+        ),
+      ),
+    );
+    const live = perShop.flat();
 
     return { accepted: true, at: now.toISOString(), orders: live.length, live };
   }

@@ -93,7 +93,12 @@ describe('rider position, end to end', () => {
     });
     tenantId = tenant.id;
     const rider = await prisma.unsafeRaw.rider.create({
-      data: { tenantId, name: 'Rakib', phone: '01700000001', token: 'test-rider-token-abcdef' },
+      data: {
+        name: 'Rakib',
+        phone: '01700000001',
+        token: 'test-rider-token-abcdef',
+        shops: { create: { tenantId, approved: true, approvedAt: new Date() } },
+      },
     });
     riderId = rider.id;
     riderToken = rider.token;

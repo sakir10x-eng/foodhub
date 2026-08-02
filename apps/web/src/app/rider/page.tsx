@@ -33,12 +33,20 @@ interface RiderOrder {
   total: number;
   dueOnDelivery: number;
   customerPhone: string;
+  /** Which shop this parcel is at. A rider carrying for three cannot collect without it. */
+  store: string;
   deliveryAddress: { name?: string; phone?: string; addressLine?: string; area?: string; note?: string; lat?: number | null; lng?: number | null };
 }
 
+interface Invite {
+  tenantId: string;
+  store: string;
+}
+
 interface Queue {
-  rider: { name: string; store: string };
+  rider: { name: string; shops: number };
   orders: RiderOrder[];
+  invites: Invite[];
 }
 
 function RunSheet() {
@@ -89,9 +97,13 @@ function RunSheet() {
   return (
     <AppShell className="px-3 pb-16 pt-6">
       <header className="px-1">
-        <p className="text-sm text-ink-muted">{queue.rider.store}</p>
+        <p className="text-sm text-ink-muted">
+          {queue.rider.shops === 1 ? '1 shop' : `${queue.rider.shops} shops`}
+        </p>
         <h1 className="text-2xl font-extrabold tracking-tight">{queue.rider.name}</h1>
       </header>
+
+      <Invites token={token} invites={queue.invites} onAnswered={load} />
 
       <LocationSharing token={token} />
 
@@ -109,6 +121,78 @@ function RunSheet() {
         </ul>
       )}
     </AppShell>
+  );
+}
+
+/**
+ * Shops asking to work with this rider.
+ *
+ * This is a consent step, not a notification. A shop that could add a rider by typing
+ * their phone number would be handed this link — and this link opens the sheet below,
+ * with every other shop's customers and addresses on it. So the shop asks, and the rider
+ * is the one who says yes.
+ *
+ * It needs no login because the rider is already holding the only proof of who they are.
+ */
+function Invites({
+  token,
+  invites,
+  onAnswered,
+}: {
+  token: string;
+  invites: Invite[];
+  onAnswered: () => Promise<void> | void;
+}) {
+  const [busy, setBusy] = useState<string | null>(null);
+
+  if (invites.length === 0) return null;
+
+  const answer = async (tenantId: string, accept: boolean) => {
+    setBusy(tenantId);
+    try {
+      await clientApi('/rider/invites', {
+        method: 'POST',
+        body: JSON.stringify({ token, tenantId, accept }),
+      });
+      await onAnswered();
+    } catch {
+      // Left on screen to try again — a failed tap here must not look like a decision.
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <section className="mt-4 space-y-2">
+      {invites.map((invite) => (
+        <article key={invite.tenantId} className="rounded-2xl border border-brand/40 bg-brand/5 p-4">
+          <p className="text-[15px] font-semibold leading-snug">
+            <span className="font-extrabold">{invite.store}</span> wants you to deliver for them.
+          </p>
+          <p className="mt-1 text-[13px] text-ink-muted">
+            Accept and their deliveries appear on this same sheet.
+          </p>
+          <div className="mt-3 flex gap-2">
+            <button
+              type="button"
+              disabled={busy === invite.tenantId}
+              onClick={() => answer(invite.tenantId, true)}
+              className="flex-1 rounded-full bg-brand px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60"
+            >
+              Accept
+            </button>
+            <button
+              type="button"
+              disabled={busy === invite.tenantId}
+              onClick={() => answer(invite.tenantId, false)}
+              className="flex-1 rounded-full border border-surface-line px-4 py-2.5 text-sm font-bold text-ink-muted disabled:opacity-60"
+            >
+              No thanks
+            </button>
+          </div>
+        </article>
+      ))}
+    </section>
   );
 }
 
@@ -231,6 +315,15 @@ function Drop({ order }: { order: RiderOrder }) {
           {order.status === 'ON_THE_WAY' ? 'On the way' : 'Ready'}
         </span>
       </div>
+
+      {/* Which counter to collect from. Sits above the address because on a multi-shop
+          run the pickup is the part the rider gets wrong, not the drop. */}
+      {order.store && (
+        <p className="mt-1 flex items-center gap-1.5 text-[13px] font-semibold text-brand">
+          <Icon name="pin" size={13} />
+          {order.store}
+        </p>
+      )}
 
       <p className="mt-2 text-[17px] font-semibold leading-snug">{addr.addressLine || '—'}</p>
       {addr.area && <p className="text-sm text-ink-muted">{addr.area}</p>}

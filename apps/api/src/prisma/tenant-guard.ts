@@ -10,7 +10,6 @@ export const TENANT_SCOPED_MODELS = new Set([
   'Category',
   'Product',
   'Order',
-  'Rider',
   'Coupon',
   'LedgerEntry',
   'Settlement',
@@ -30,6 +29,14 @@ export const TENANT_SCOPED_MODELS = new Set([
 export const UNGUARDED_MODELS = new Set([
   'User', // customers + platform admins have tenantId = null
   'Image', // platform-owned images have tenantId = null
+  // A rider is a person who carries for several shops, so there is no single tenantId to
+  // filter on — the shops are rows in RiderShop. This is the one model here that is
+  // unguarded because of a deliberate design choice rather than a nullable column, and it
+  // is the most dangerous of them: a rider's token opens a run sheet showing customers'
+  // addresses. Every read in ops.service.ts therefore filters through an approved
+  // RiderShop by hand, and rider-isolation.spec.ts is what proves it still does.
+  'Rider',
+  'RiderShop', // reached via riderId/tenantId, both filtered explicitly at every use
   'RefreshToken', // reached via userId
   'SavedAddress', // reached via userId
   'OrderItem', // reached via orderId, which is guarded

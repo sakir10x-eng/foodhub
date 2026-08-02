@@ -60,10 +60,11 @@ class VendorOpsController {
 
   @Post('orders/:id/rider')
   assign(
+    @CurrentTenant() tenant: RequestTenant,
     @Param('id') id: string,
     @Body(new ZodBody(z.object({ riderId: z.string().uuid().nullable() }))) dto: any,
   ) {
-    return this.ops.assignRider(id, dto.riderId);
+    return this.ops.assignRider(tenant.id, id, dto.riderId);
   }
 
   /** A vendor answering a review in public. */
@@ -119,6 +120,27 @@ class RiderController {
       }
     }
     return { accepted: result.accepted, sharingWith: result.orders };
+  }
+
+  /**
+   * The rider accepting or declining a shop that has asked to work with them.
+   *
+   * Authorised by the same token as the run sheet, because that token is already the proof
+   * of who they are — requiring a login here would mean the consent step could not ship
+   * until riders had accounts, and the invitation is what makes sharing a rider safe.
+   */
+  @Public()
+  @PlatformScope('a rider answers an invitation against its own run-sheet token')
+  @Post('invites')
+  respond(
+    @Body(new ZodBody(z.object({
+      token: z.string().min(1),
+      tenantId: z.string().uuid(),
+      accept: z.boolean(),
+    })))
+    dto: any,
+  ) {
+    return this.ops.respondToInvite(dto.token, dto.tenantId, dto.accept);
   }
 }
 

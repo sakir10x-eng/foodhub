@@ -9,7 +9,10 @@ interface Rider {
   id: string;
   name: string;
   phone: string;
-  token: string;
+  /** False while the rider has been invited but has not answered yet. */
+  approved: boolean;
+  /** Withheld until they accept — see the note by the invited row below. */
+  token: string | null;
 }
 
 /**
@@ -20,6 +23,11 @@ interface Rider {
  * something you touch once. Only orders that have left the kitchen are listed — a rider
  * assigned to something still being cooked is a decision that will be wrong by the time
  * it matters.
+ *
+ * A rider is a person, not this shop's staff: the same one may carry for the grocer next
+ * door on the same trip. So adding somebody who already rides elsewhere sends them an
+ * invitation rather than hiring them outright, and this screen has to show that waiting
+ * state honestly instead of pretending the rider is available.
  */
 export function Riders({ storefrontUrl }: { storefrontUrl: string }) {
   const [riders, setRiders] = useState<Rider[]>([]);
@@ -82,17 +90,18 @@ export function Riders({ storefrontUrl }: { storefrontUrl: string }) {
     }
   };
 
-  const linkFor = (rider: Rider) => `${storefrontUrl}/rider?token=${rider.token}`;
-
   const copy = async (rider: Rider) => {
+    if (!rider.token) return;
     try {
-      await navigator.clipboard.writeText(linkFor(rider));
+      await navigator.clipboard.writeText(`${storefrontUrl}/rider?token=${rider.token}`);
       setCopied(rider.id);
       setTimeout(() => setCopied(null), 2000);
     } catch {
-      // Clipboard refused (an insecure origin, usually). The link is on screen anyway.
+      // Clipboard refused (an insecure origin, usually).
     }
   };
+
+  const assignable = riders.filter((r) => r.approved);
 
   return (
     <section className="mb-6 rounded-2xl border border-surface-line bg-white p-4 shadow-card">
@@ -131,15 +140,24 @@ export function Riders({ storefrontUrl }: { storefrontUrl: string }) {
                 <p className="truncate text-sm font-semibold">{rider.name}</p>
                 <p className="truncate text-xs text-ink-faint">{rider.phone}</p>
               </div>
-              {/* The link IS the rider's login, so it is copied rather than displayed in
-                  full — a token read aloud across a counter is a token everybody has. */}
-              <button
-                type="button"
-                onClick={() => copy(rider)}
-                className="shrink-0 rounded-full border border-surface-line px-3 py-1.5 text-xs font-semibold text-ink-muted transition hover:border-brand hover:text-brand"
-              >
-                {copied === rider.id ? 'Copied ✓' : 'Copy link'}
-              </button>
+              {rider.approved ? (
+                /* The link IS the rider's login, so it is copied rather than displayed in
+                   full — a token read aloud across a counter is a token everybody has. */
+                <button
+                  type="button"
+                  onClick={() => copy(rider)}
+                  className="shrink-0 rounded-full border border-surface-line px-3 py-1.5 text-xs font-semibold text-ink-muted transition hover:border-brand hover:text-brand"
+                >
+                  {copied === rider.id ? 'Copied ✓' : 'Copy link'}
+                </button>
+              ) : (
+                /* No link here, and that is the feature. This rider already delivers for
+                   somebody else, and their link opens a sheet with that shop's customers
+                   on it — so it is theirs to hand over, not ours. */
+                <span className="shrink-0 rounded-full bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-700">
+                  Invited — waiting for them
+                </span>
+              )}
             </li>
           ))}
         </ul>
@@ -157,14 +175,16 @@ export function Riders({ storefrontUrl }: { storefrontUrl: string }) {
               <span className="min-w-0 flex-1 truncate text-sm text-ink-muted">
                 {order.deliveryAddress.area || order.deliveryAddress.addressLine}
               </span>
+              {/* Only riders who have accepted are offered: an invited one cannot be
+                  assigned yet, and listing them would produce a refusal at the counter. */}
               <select
                 className="field h-10 min-h-0 w-40 py-0 text-sm"
-                disabled={busy || riders.length === 0}
+                disabled={busy || assignable.length === 0}
                 value={order.riderId ?? ''}
                 onChange={(e) => assign(order.id, e.target.value)}
               >
                 <option value="">Unassigned</option>
-                {riders.map((rider) => (
+                {assignable.map((rider) => (
                   <option key={rider.id} value={rider.id}>{rider.name}</option>
                 ))}
               </select>

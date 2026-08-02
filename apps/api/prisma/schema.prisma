@@ -189,7 +189,7 @@ model Tenant {
   recurringOrders     Subscription_Order[]
   referrals           Referral[]
   couponFunding       CouponFunding[]
-  riders              Rider[]
+  riderShops          RiderShop[]
 
   @@index([listedOnMarketplace, isOpen])
   /// GIN: the marketplace filter asks whether the array CONTAINS a tag, which a btree
@@ -501,18 +501,27 @@ model ComboItem {
 
 /// Somebody who carries the food.
 ///
-/// Riders belong to the vendor, not the platform: v1 is self-delivery, and a rider here is
-/// a phone number the kitchen can point at an order and a name the customer can be told.
+/// A rider is a PERSON, not one shop's staff. In a village the same rider takes the
+/// ভাতের হোটেল's parcels and the মুদি দোকান's on one trip, and an Order belongs to exactly
+/// one shop — so "several shops, one trip" can only be modelled here, above the order.
+///
+/// The price of that is real and is paid on purpose: `Rider` is no longer tenant-scoped,
+/// so `tenant-guard.ts` does not filter it and **every query in this file must carry its
+/// own approved-shop filter by hand**. See UNGUARDED_MODELS for the whole argument.
 model Rider {
-  id       String @id @default(uuid()) @db.Uuid
-  tenantId String @db.Uuid
-  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id String @id @default(uuid()) @db.Uuid
 
-  name     String
-  phone    String
+  name String
+  /// The person. One human, one row — a rider working for three shops must not become
+  /// three rows, or their run sheet, their position and their cash are three unrelated
+  /// things that never add up.
+  phone    String  @unique
   isActive Boolean @default(true)
   /// Rotated per rider so a delivery link cannot be guessed from an order code.
-  token    String  @unique
+  ///
+  /// ONE token per person, not one per shop: the whole point of this model is that a
+  /// rider opens a single sheet and sees their whole day on it.
+  token String @unique
 
   /// Where the rider last reported being, and when.
   ///
@@ -525,11 +534,36 @@ model Rider {
   lng        Float?
   locationAt DateTime?
 
+  shops     RiderShop[]
   orders    Order[]
   createdAt DateTime @default(now())
 
-  @@index([tenantId, isActive])
+  @@index([isActive])
   @@map("riders")
+}
+
+/// Which shops a rider carries for.
+///
+/// `approved` is the whole security model of a shared rider. Adding somebody who already
+/// rides for another shop creates a **pending** link, and only the rider turns it on —
+/// from the run sheet they are already holding, so this needs no login to work.
+///
+/// Without that, any vendor could type a rider's phone number, be handed their token, and
+/// read every other shop's customer addresses off that rider's sheet. It would be the
+/// same leak we just closed, wearing a feature as a disguise.
+model RiderShop {
+  riderId  String @db.Uuid
+  rider    Rider  @relation(fields: [riderId], references: [id], onDelete: Cascade)
+  tenantId String @db.Uuid
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  approved   Boolean   @default(false)
+  approvedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@id([riderId, tenantId])
+  @@index([tenantId, approved])
+  @@map("rider_shops")
 }
 
 /// A share of a discount that WE fund.

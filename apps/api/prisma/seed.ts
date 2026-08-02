@@ -522,12 +522,23 @@ async function seedModifiersAndCombos(tenantId: string, slug: string) {
   }
 
   // One rider per store, so assignment has something to point at.
+  //
+  // The phone numbers must differ. A rider is a person identified by their phone and may
+  // carry for several shops, so three demo riders sharing one placeholder number would be
+  // one person working three jobs — which is a legitimate thing to model, but not what
+  // three different names mean.
+  const rider =
+    slug === 'chai-adda'
+      ? { name: 'Rasel', phone: '01712000001' }
+      : slug === 'pizza-shack'
+        ? { name: 'Jony', phone: '01712000002' }
+        : { name: 'Shamim', phone: '01712000003' };
+
   await prisma.rider.create({
     data: {
-      tenantId,
-      name: slug === 'chai-adda' ? 'Rasel' : slug === 'pizza-shack' ? 'Jony' : 'Shamim',
-      phone: '01712000000',
+      ...rider,
       token: Buffer.from(`${slug}-rider-1`).toString('base64url'),
+      shops: { create: { tenantId, approved: true, approvedAt: new Date() } },
     },
   });
 }
