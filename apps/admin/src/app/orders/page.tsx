@@ -6,6 +6,7 @@ import { adminApi } from '../../lib/auth';
 import { Banner, PageHeader, Shell } from '../../components/Shell';
 import { Riders } from '../../components/Riders';
 import { RiderMoney } from '../../components/RiderMoney';
+import { RiderAlerts } from '../../components/RiderAlerts';
 
 const FILTERS = [
   { key: '', label: 'All' },
@@ -63,6 +64,7 @@ function OrderHistory() {
       <div className="p-4">
         {error && <Banner tone="error">{error}</Banner>}
 
+        <RiderAlerts />
         <Riders storefrontUrl={storefrontUrl()} />
         <RiderMoney />
 

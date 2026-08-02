@@ -10,6 +10,8 @@ import { randomBytes } from 'node:crypto';
 import {
   DELIVERY_OTP_MAX_ATTEMPTS,
   RIDER_FIX_MAX_ACCURACY_M,
+  canCarry,
+  cartWeightGrams,
   deliveryOtpMatches,
   planStops,
   riderCoversDelivery,
@@ -295,7 +297,10 @@ export class OpsService {
   private async riderByToken(token: string) {
     const rider = await this.prisma.db.rider.findUnique({
       where: { token },
-      select: { id: true, name: true, isActive: true, onDuty: true, lat: true, lng: true },
+      select: {
+        id: true, name: true, isActive: true, onDuty: true,
+        lat: true, lng: true, capacityKg: true,
+      },
     });
     if (!rider || !rider.isActive) throw new NotFoundException('This delivery link is no longer valid');
     return rider;
@@ -360,11 +365,172 @@ export class OpsService {
    */
   async setDuty(token: string, onDuty: boolean) {
     const rider = await this.riderByToken(token);
+    const now = new Date();
+
     await this.prisma.db.rider.update({
       where: { id: rider.id },
-      data: { onDuty, dutySince: onDuty ? new Date() : null },
+      data: { onDuty, dutySince: onDuty ? now : null },
     });
+
+    // Attendance is a by-product of the switch they already use, not a second thing to
+    // remember. A rider who has to clock in as well as go on duty will do one of the two,
+    // and the record would become a record of who remembered.
+    if (onDuty) {
+      const open = await this.prisma.db.riderShift.findFirst({
+        where: { riderId: rider.id, endedAt: null },
+        select: { id: true },
+      });
+      if (!open) await this.prisma.db.riderShift.create({ data: { riderId: rider.id, startedAt: now } });
+    } else {
+      await this.prisma.db.riderShift.updateMany({
+        where: { riderId: rider.id, endedAt: null },
+        data: { endedAt: now },
+      });
+    }
     return { onDuty };
+  }
+
+  /**
+   * How a rider has actually been doing.
+   *
+   * Every number here is counted from something that really happened, and named for what
+   * it really measures. "Acceptance rate" is **taken versus passed** — not offers shown,
+   * because nothing records an offer being seen, and calling it that would be a statistic
+   * about a thing we do not observe. A number a rider could be judged on has to be one
+   * they could check.
+   */
+  async riderPerformance(riderId: string, since?: Date) {
+    const from = since ?? new Date(Date.now() - 30 * 86_400_000);
+    const shopIds = await this.approvedShopIds(riderId);
+
+    let delivered = 0;
+    let returned = 0;
+    let carried = 0;
+    let pickupToDoorMs = 0;
+    let timed = 0;
+
+    for (const tenantId of shopIds) {
+      await TenantContext.runAsTenant(tenantId, async () => {
+        const orders = await this.prisma.db.order.findMany({
+          where: { riderId, placedAt: { gte: from } },
+          select: { status: true, pickedUpAt: true, deliveredAt: true },
+        });
+        for (const order of orders) {
+          carried++;
+          if (order.status === 'DELIVERED') delivered++;
+          if (order.status === 'RETURNED') returned++;
+          if (order.pickedUpAt && order.deliveredAt) {
+            pickupToDoorMs += order.deliveredAt.getTime() - order.pickedUpAt.getTime();
+            timed++;
+          }
+        }
+      });
+    }
+
+    const [passed, failedAttempts, shifts] = await Promise.all([
+      this.prisma.db.riderOfferSkip.count({ where: { riderId, createdAt: { gte: from } } }),
+      this.prisma.db.deliveryAttempt.count({ where: { riderId, createdAt: { gte: from } } }),
+      this.prisma.db.riderShift.findMany({
+        where: { riderId, startedAt: { gte: from } },
+        select: { startedAt: true, endedAt: true },
+      }),
+    ]);
+
+    const onDutyMs = shifts.reduce(
+      (sum, s) => sum + ((s.endedAt ?? new Date()).getTime() - s.startedAt.getTime()),
+      0,
+    );
+
+    return {
+      since: from.toISOString(),
+      carried,
+      delivered,
+      returned,
+      /** Deliveries that were tried and did not happen. Not the same as returns. */
+      failedAttempts,
+      passed,
+      /** Taken ÷ (taken + passed). Null when they have neither taken nor passed anything. */
+      takeRate: carried + passed > 0 ? Math.round((carried / (carried + passed)) * 100) : null,
+      /** Minutes from leaving the counter to the door, averaged. Null with nothing timed. */
+      avgPickupToDoorMinutes: timed > 0 ? Math.round(pickupToDoorMs / timed / 60_000) : null,
+      shifts: shifts.length,
+      onDutyHours: Math.round((onDutyMs / 3_600_000) * 10) / 10,
+    };
+  }
+
+  /** A rider's own profile: what they ride and who to call if something happens. */
+  async setRiderProfile(
+    token: string,
+    input: { vehicle?: string; capacityKg?: number; emergencyPhone?: string | null },
+  ) {
+    const rider = await this.riderByToken(token);
+    await this.prisma.db.rider.update({
+      where: { id: rider.id },
+      data: {
+        ...(input.vehicle ? { vehicle: input.vehicle as any } : {}),
+        ...(input.capacityKg !== undefined ? { capacityKg: input.capacityKg } : {}),
+        ...(input.emergencyPhone !== undefined ? { emergencyPhone: input.emergencyPhone } : {}),
+      },
+    });
+    return this.riderProfile(token);
+  }
+
+  async riderProfile(token: string) {
+    const rider = await this.riderByToken(token);
+    const row = await this.prisma.db.rider.findUnique({
+      where: { id: rider.id },
+      select: { name: true, phone: true, vehicle: true, capacityKg: true, emergencyPhone: true },
+    });
+    return row;
+  }
+
+  /**
+   * Something has gone wrong.
+   *
+   * One tap and a position, and it reaches every shop the rider is out for — because
+   * nobody at a counter knows which of their parcels the rider was carrying when the bike
+   * went down, and the answer is usually "several shops'".
+   */
+  async raiseAlert(token: string, kind: string, note?: string) {
+    const rider = await this.riderByToken(token);
+    const alert = await this.prisma.db.riderAlert.create({
+      data: { riderId: rider.id, kind: kind as any, note: note?.trim() || null, lat: rider.lat, lng: rider.lng },
+      select: { id: true, kind: true, createdAt: true },
+    });
+    this.logger.warn(`Rider alert ${alert.kind} from ${rider.name} (${rider.id})`);
+    return alert;
+  }
+
+  /** Open alerts from riders this shop works with. */
+  async shopAlerts(tenantId: string) {
+    const riderIds = await this.prisma.db.riderShop
+      .findMany({ where: { tenantId, approved: true }, select: { riderId: true } })
+      .then((rows) => rows.map((r) => r.riderId));
+    if (riderIds.length === 0) return [];
+
+    return this.prisma.db.riderAlert.findMany({
+      where: { riderId: { in: riderIds }, resolvedAt: null },
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+      select: {
+        id: true, kind: true, note: true, lat: true, lng: true, createdAt: true,
+        rider: { select: { name: true, phone: true, emergencyPhone: true } },
+      },
+    });
+  }
+
+  async resolveAlert(tenantId: string, alertId: string) {
+    // Only an alert from a rider this shop actually works with.
+    const riderIds = await this.prisma.db.riderShop
+      .findMany({ where: { tenantId, approved: true }, select: { riderId: true } })
+      .then((rows) => rows.map((r) => r.riderId));
+
+    const done = await this.prisma.db.riderAlert.updateMany({
+      where: { id: alertId, riderId: { in: riderIds } },
+      data: { resolvedAt: new Date() },
+    });
+    if (done.count === 0) throw new NotFoundException('Alert not found');
+    return { ok: true };
   }
 
   /**
@@ -461,6 +627,9 @@ export class OpsService {
               select: {
                 id: true, code: true, status: true, dueOnDelivery: true,
                 deliveryAddress: true, placedAt: true,
+                // Weight comes from the line snapshots, not the live product, so an order
+                // is judged by what was actually put in the bag.
+                items: { select: { qty: true, product: { select: { weightGrams: true } } } },
               },
             }),
           ]);
@@ -474,6 +643,11 @@ export class OpsService {
             .filter((order) => !skipped.has(order.id))
             .filter((order) => !(capped && order.dueOnDelivery > 0))
             .filter((order) => riderCoversDelivery(shapes, addressTarget(order.deliveryAddress)))
+            // Nothing is offered that will not physically go on the vehicle. A sack of
+            // rice on a card the rider cannot accept wastes their trip and the customer's
+            // evening; `canCarry` deliberately lets unweighed orders through rather than
+            // making an unweighed catalogue undeliverable.
+            .filter((order) => canCarry(orderWeight(order.items), rider.capacityKg))
             .map((order) => ({
               id: order.id,
               code: order.code,
@@ -481,6 +655,7 @@ export class OpsService {
               store: shop?.name ?? '',
               area: (order.deliveryAddress as any)?.area ?? '',
               dueOnDelivery: order.dueOnDelivery,
+              weightGrams: orderWeight(order.items).grams,
               placedAt: order.placedAt,
             }));
         }),
@@ -1153,6 +1328,13 @@ export interface TripStopView {
   phone: string;
   deliveryAddress: unknown;
   dueOnDelivery: number;
+}
+
+/** What an order weighs, from its line snapshots. See `cartWeightGrams` for the rule. */
+function orderWeight(items: { qty: number; product: { weightGrams: number } | null }[]) {
+  return cartWeightGrams(
+    (items ?? []).map((i) => ({ qty: i.qty, weightGrams: i.product?.weightGrams ?? 0 })),
+  );
 }
 
 /** The rider's own last position, when they have shared one. Used to start the route. */

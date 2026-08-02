@@ -8,6 +8,7 @@ export * from './pricing';
 export * from './rider-area';
 export * from './trip';
 export * from './delivery-proof';
+export * from './capacity';
 export * from './plans';
 export * from './schemas';
 export * from './api-types';

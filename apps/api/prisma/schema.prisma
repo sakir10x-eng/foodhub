@@ -371,6 +371,14 @@ model Product {
 
   name        String
   description String @default("")
+
+  /// How heavy one of these is, in grams. 0 means "not weighed".
+  ///
+  /// Cooked food does not need this and will stay at 0 forever. Groceries do: twenty kilos
+  /// of rice does not go on a motorcycle, and an order that exceeds what a rider can carry
+  /// must not be offered to them. Zero is treated as unknown rather than weightless — see
+  /// `cartWeightGrams`, which reports what it could not weigh instead of guessing.
+  weightGrams Int @default(0)
   /// Poisha.
   price       Int
   /// Poisha. What this used to cost, shown struck through beside the price.
@@ -560,8 +568,20 @@ model Rider {
   onDuty    Boolean   @default(false)
   dutySince DateTime?
 
+  /// What they ride, and how much it holds.
+  ///
+  /// `capacityKg` is not decoration: twenty kilos of rice does not go on a motorcycle, and
+  /// a grocery order that exceeds it must not be offered to somebody who cannot carry it.
+  vehicle    Vehicle @default(MOTORCYCLE)
+  capacityKg Int     @default(15)
+
+  /// Who to ring when something has gone wrong on a road at night.
+  emergencyPhone String?
+
   shops     RiderShop[]
   areas     RiderArea[]
+  shifts    RiderShift[]
+  alerts    RiderAlert[]
   skips     RiderOfferSkip[]
   trips     Trip[]
   attempts  DeliveryAttempt[]
@@ -600,6 +620,62 @@ model RiderArea {
 /// happens to be carrying; EARNINGS is the rider's own money that we owe them. Add them
 /// together and "৳500 not yet handed in" becomes indistinguishable from "৳500 of wages
 /// owed" — two facts with opposite signs pointing at opposite people.
+/// What a rider carries on. Capacity travels with the rider, not the vehicle type, because
+/// two people with the same motorcycle carry different amounts and only they know it.
+enum Vehicle {
+  BICYCLE
+  MOTORCYCLE
+  VAN
+  FOOT
+}
+
+/// One period on duty.
+///
+/// Written from the duty toggle rather than asked for separately: a rider who has to
+/// remember to clock in as well as go on duty will do one of the two, and the attendance
+/// record will be a record of who remembered.
+model RiderShift {
+  id      String @id @default(uuid()) @db.Uuid
+  riderId String @db.Uuid
+  rider   Rider  @relation(fields: [riderId], references: [id], onDelete: Cascade)
+
+  startedAt DateTime  @default(now())
+  /// Null while the shift is still open.
+  endedAt   DateTime?
+
+  @@index([riderId, startedAt])
+  @@map("rider_shifts")
+}
+
+enum AlertKind {
+  ACCIDENT
+  BREAKDOWN
+  UNSAFE
+  OTHER
+}
+
+/// A rider saying something has gone wrong.
+///
+/// Deliberately one tap and a position. Somebody standing beside a bike on a dark road is
+/// not going to fill in a form, and a button that demands one is a button that does not
+/// get pressed.
+model RiderAlert {
+  id      String @id @default(uuid()) @db.Uuid
+  riderId String @db.Uuid
+  rider   Rider  @relation(fields: [riderId], references: [id], onDelete: Cascade)
+
+  kind AlertKind
+  note String?
+  lat  Float?
+  lng  Float?
+
+  resolvedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([riderId, createdAt])
+  @@map("rider_alerts")
+}
+
 enum RiderAccount {
   CASH
   EARNINGS

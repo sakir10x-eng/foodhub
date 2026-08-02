@@ -114,6 +114,24 @@ class VendorOpsController {
     return this.ops.releaseDeliveryProof(tenant.id, id, `vendor:${user.id}`);
   }
 
+  /** How a rider has been doing. Every number counted from something that happened. */
+  @Get('riders/:id/performance')
+  async performance(@CurrentTenant() tenant: RequestTenant, @Param('id') id: string) {
+    // Only for a rider this shop actually works with.
+    await this.ops.areasForShop(tenant.id, id);
+    return this.ops.riderPerformance(id);
+  }
+
+  @Get('rider-alerts')
+  alerts(@CurrentTenant() tenant: RequestTenant) {
+    return this.ops.shopAlerts(tenant.id);
+  }
+
+  @Post('rider-alerts/:id/resolve')
+  resolveAlert(@CurrentTenant() tenant: RequestTenant, @Param('id') id: string) {
+    return this.ops.resolveAlert(tenant.id, id);
+  }
+
   /** A vendor answering a review in public. */
   @Post('reviews/:id/reply')
   reply(
@@ -273,6 +291,40 @@ class RiderController {
    * of who they are — requiring a login here would mean the consent step could not ship
    * until riders had accounts, and the invitation is what makes sharing a rider safe.
    */
+  /** What they ride and who to call. Theirs to set — only they know what fits. */
+  @Public()
+  @PlatformScope('a rider reads its own profile against its own run-sheet token')
+  @Post('profile')
+  profile(
+    @Body(new ZodBody(z.object({
+      token: z.string().min(1),
+      vehicle: z.enum(['BICYCLE', 'MOTORCYCLE', 'VAN', 'FOOT']).optional(),
+      capacityKg: z.number().int().min(1).max(500).optional(),
+      emergencyPhone: bdPhone.nullish(),
+    })))
+    dto: any,
+  ) {
+    const { token, ...rest } = dto;
+    return Object.keys(rest).length > 0
+      ? this.ops.setRiderProfile(token, rest)
+      : this.ops.riderProfile(token);
+  }
+
+  /** Something has gone wrong. One tap; the position comes from their last fix. */
+  @Public()
+  @PlatformScope('a rider raises an alert against its own run-sheet token')
+  @Post('alert')
+  alert(
+    @Body(new ZodBody(z.object({
+      token: z.string().min(1),
+      kind: z.enum(['ACCIDENT', 'BREAKDOWN', 'UNSAFE', 'OTHER']),
+      note: z.string().trim().max(300).optional(),
+    })))
+    dto: any,
+  ) {
+    return this.ops.raiseAlert(dto.token, dto.kind, dto.note);
+  }
+
   /** What the rider is carrying and what they have earned. Their own money, their screen. */
   @Public()
   @PlatformScope('a rider reads its own money against its own run-sheet token')

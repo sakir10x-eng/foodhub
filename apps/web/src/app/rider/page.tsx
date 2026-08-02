@@ -117,6 +117,8 @@ function RunSheet() {
 
       <Money token={token} />
 
+      <Trouble token={token} />
+
       <Available token={token} onClaimed={load} />
 
       <LocationSharing token={token} />
@@ -154,6 +156,86 @@ interface Stop {
   phone: string;
   deliveryAddress: RiderOrder['deliveryAddress'] | null;
   dueOnDelivery: number;
+}
+
+/**
+ * Something has gone wrong.
+ *
+ * Folded away behind one word so it is not a red button sitting on the screen all day, and
+ * two taps from open to sent — somebody standing beside a bike on a dark road will not
+ * fill in a form, and a button that asks for one is a button that does not get pressed.
+ * The position comes from their last shared fix; nothing extra is asked for.
+ */
+function Trouble({ token }: { token: string }) {
+  const [open, setOpen] = useState(false);
+  const [sent, setSent] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const kinds: { value: string; label: string }[] = [
+    { value: 'ACCIDENT', label: 'Accident' },
+    { value: 'BREAKDOWN', label: 'Bike trouble' },
+    { value: 'UNSAFE', label: 'I do not feel safe' },
+    { value: 'OTHER', label: 'Something else' },
+  ];
+
+  const raise = async (kind: string) => {
+    setBusy(true);
+    try {
+      await clientApi('/rider/alert', { method: 'POST', body: JSON.stringify({ token, kind }) });
+      setSent(true);
+      setOpen(false);
+    } catch {
+      /* left open to try again — a failed tap must not look like a sent alert */
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (sent) {
+    return (
+      <p className="mt-3 rounded-xl bg-red-50 px-3 py-2 text-sm font-semibold text-red-800">
+        The shops you are out for have been told. Ring them if you can.
+      </p>
+    );
+  }
+
+  return (
+    <div className="mt-3">
+      {!open ? (
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          className="text-sm font-semibold text-red-700 underline"
+        >
+          Something is wrong
+        </button>
+      ) : (
+        <div className="rounded-xl border border-red-200 bg-red-50 p-3">
+          <p className="text-sm font-bold text-red-900">Tell the shops what happened</p>
+          <div className="mt-2 grid grid-cols-2 gap-2">
+            {kinds.map((k) => (
+              <button
+                key={k.value}
+                type="button"
+                disabled={busy}
+                onClick={() => raise(k.value)}
+                className="rounded-full bg-white px-3 py-2.5 text-sm font-bold text-red-800 disabled:opacity-60"
+              >
+                {k.label}
+              </button>
+            ))}
+          </div>
+          <button
+            type="button"
+            onClick={() => setOpen(false)}
+            className="mt-2 text-xs font-semibold text-ink-muted underline"
+          >
+            Never mind
+          </button>
+        </div>
+      )}
+    </div>
+  );
 }
 
 /**

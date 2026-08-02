@@ -69,6 +69,11 @@ const productBaseSchema = z.object({
   isAvailable: z.boolean().optional().default(true),
   listedOnMarketplace: z.boolean().optional().default(true),
   sortOrder: z.number().int().min(0).max(9999).optional(),
+  /**
+   * Grams. 0 means "not weighed", which is the honest default for cooked food and the
+   * reason a grocer's unweighed catalogue does not become undeliverable overnight.
+   */
+  weightGrams: z.number().int().min(0).max(200_000).optional(),
 });
 
 /**
