@@ -534,12 +534,63 @@ model Rider {
   lng        Float?
   locationAt DateTime?
 
+  /// On the road right now, and since when.
+  ///
+  /// Off by default and flipped by the rider, never by a shop: work that arrives on
+  /// somebody's phone after their shift is over is how a delivery gets accepted and then
+  /// silently not made. `dutySince` is also where attendance comes from later, which is
+  /// why the moment is kept rather than just the flag.
+  onDuty    Boolean   @default(false)
+  dutySince DateTime?
+
   shops     RiderShop[]
+  areas     RiderArea[]
+  skips     RiderOfferSkip[]
   orders    Order[]
   createdAt DateTime @default(now())
 
-  @@index([isActive])
+  @@index([isActive, onDuty])
   @@map("riders")
+}
+
+/// A patch a rider will deliver to.
+///
+/// `shape` is a GeoShape — the same polygon / circle / area-name description a
+/// DeliveryZone uses, because a rider's patch and a shop's delivery area are the same kind
+/// of claim about the same map. See @foodhub/shared rider-area.ts, which owns the matching
+/// rules so the API and the rider's screen can never disagree about whose work this is.
+model RiderArea {
+  id      String @id @default(uuid()) @db.Uuid
+  riderId String @db.Uuid
+  rider   Rider  @relation(fields: [riderId], references: [id], onDelete: Cascade)
+
+  /// What the rider calls it — "চর কাদিরপুর", "বাজার + উত্তর পাড়া".
+  label String
+  shape Json   @default("{}")
+
+  createdAt DateTime @default(now())
+
+  @@index([riderId])
+  @@map("rider_areas")
+}
+
+/// A delivery this rider has passed on.
+///
+/// Kept rather than forgotten for two reasons: the offer must stop reappearing at the top
+/// of their list every thirty seconds, and how often somebody passes is the only honest
+/// input to an acceptance rate later. It is a skip, not a refusal on record — the order
+/// stays fully available to everyone else.
+model RiderOfferSkip {
+  riderId String @db.Uuid
+  rider   Rider  @relation(fields: [riderId], references: [id], onDelete: Cascade)
+  orderId String @db.Uuid
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@id([riderId, orderId])
+  @@index([orderId])
+  @@map("rider_offer_skips")
 }
 
 /// Which shops a rider carries for.
@@ -830,6 +881,8 @@ model Order {
   /// Who is carrying it. Null until the kitchen assigns someone.
   riderId String? @db.Uuid
   rider   Rider?  @relation(fields: [riderId], references: [id], onDelete: SetNull)
+  /// Riders who have passed on this one; it stays available to everybody else.
+  riderSkips RiderOfferSkip[]
 
   /// When the customer asked for it. Null means as soon as possible.
   ///
