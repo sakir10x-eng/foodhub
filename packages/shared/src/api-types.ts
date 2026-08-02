@@ -221,6 +221,13 @@ export interface OrderDto {
   advanceAmount: number;
   /** What the rider collects at the door. Always `total - advanceAmount`. */
   dueOnDelivery: number;
+  /**
+   * The code the customer reads out at the door, once the order is on the road.
+   *
+   * Reaches the customer and the vendor. **Never the rider** — their run sheet is built
+   * from different selects, and a code the rider can read proves nothing.
+   */
+  deliveryOtp?: string | null;
   items: OrderItemDto[];
   deliveryAddress: {
     name: string;

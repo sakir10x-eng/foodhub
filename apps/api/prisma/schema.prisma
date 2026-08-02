@@ -119,6 +119,14 @@ model Tenant {
   /// Fake cash-on-delivery orders are a real cost in BD food delivery: the kitchen
   /// cooks, the rider rides, nobody answers the door. These let a vendor require money
   /// up front instead of absorbing that.
+  /// Require the customer's code at the door before a rider may mark a delivery done.
+  ///
+  /// Off by default, and that is not timidity. Switching it on for everybody at once would
+  /// stop deliveries at any shop whose customers never saw the code — so a vendor turns it
+  /// on when they want it, and the code is shown on the customer's own tracker as well as
+  /// texted, so it works even where SMS does not.
+  deliveryOtpRequired Boolean @default(false)
+
   codEnabled       Boolean @default(true)
   /// Share of the order that must be paid before the kitchen starts. 0 = none, 50 =
   /// half, 100 = full prepayment.
@@ -547,6 +555,7 @@ model Rider {
   areas     RiderArea[]
   skips     RiderOfferSkip[]
   trips     Trip[]
+  attempts  DeliveryAttempt[]
   orders    Order[]
   createdAt DateTime @default(now())
 
@@ -573,6 +582,40 @@ model RiderArea {
 
   @@index([riderId])
   @@map("rider_areas")
+}
+
+enum AttemptFailReason {
+  NO_ANSWER
+  WRONG_ADDRESS
+  REFUSED
+  NO_CASH
+  OTHER
+}
+
+/// A delivery that was tried and did not happen.
+///
+/// Kept as its own row rather than a counter, because the reason is the whole value. "Ten
+/// failed deliveries" tells a shop nothing; "eight of them were nobody home in one village"
+/// tells them to ring before riding, and "three were no cash" tells them to ask for an
+/// advance there. The position is recorded so an attempt claimed from the shop's own
+/// courtyard can be recognised for what it is.
+model DeliveryAttempt {
+  id      String @id @default(uuid()) @db.Uuid
+  orderId String @db.Uuid
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  riderId String @db.Uuid
+  rider   Rider  @relation(fields: [riderId], references: [id], onDelete: Cascade)
+
+  reason AttemptFailReason
+  note   String?
+  lat    Float?
+  lng    Float?
+
+  createdAt DateTime @default(now())
+
+  @@index([orderId])
+  @@index([riderId, createdAt])
+  @@map("delivery_attempts")
 }
 
 enum TripStatus {
@@ -893,6 +936,10 @@ enum OrderStatus {
   READY
   ON_THE_WAY
   DELIVERED
+  /// Ridden out, not handed over, brought back. Not the same as CANCELLED: the goods were
+  /// made and the journey happened, and a shop that cannot count these cannot see the one
+  /// number that matters most to it — how often nobody answers the door.
+  RETURNED
   CANCELLED
   REFUNDED
 }
@@ -954,6 +1001,18 @@ model Order {
   riderSkips RiderOfferSkip[]
   /// Its place in a rider's run — one PICKUP at the shop, one DROP at the door.
   tripStops  TripStop[]
+
+  /// The code the customer reads out at the door.
+  ///
+  /// Issued when the order goes onto the road and never before — a code that exists while
+  /// the food is still being cooked is a code the customer has already lost. It is
+  /// serialised to the **customer and the vendor only**; the rider's run sheet must never
+  /// carry it, or the proof proves nothing.
+  deliveryOtp         String?
+  /// Wrong codes so far. Locks at DELIVERY_OTP_MAX_ATTEMPTS; the shop can still release it.
+  deliveryOtpAttempts Int     @default(0)
+
+  attempts DeliveryAttempt[]
 
   /// When the rider actually took it off the counter.
   ///

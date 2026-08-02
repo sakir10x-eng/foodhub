@@ -155,6 +155,134 @@ interface Stop {
 }
 
 /**
+ * The doorstep.
+ *
+ * Three things can happen at a door and the screen has to make all three easy, because the
+ * two that are not "delivered" are the ones a tired rider will otherwise fake. The code box
+ * is first and largest; failing is a plain link, not a hidden gesture; and taking the
+ * parcel back is only offered **after** an attempt has been recorded, so "returned" always
+ * has a reason behind it.
+ */
+function Handover({
+  busy,
+  onDeliver,
+  onFail,
+  onReturn,
+}: {
+  busy: boolean;
+  onDeliver: (otp: string) => Promise<void> | void;
+  onFail: (reason: string, note: string) => Promise<void> | void;
+  onReturn: () => Promise<void> | void;
+}) {
+  const [otp, setOtp] = useState('');
+  const [failing, setFailing] = useState(false);
+  const [attempted, setAttempted] = useState(false);
+  const [reason, setReason] = useState('NO_ANSWER');
+  const [note, setNote] = useState('');
+
+  const reasons: { value: string; label: string }[] = [
+    { value: 'NO_ANSWER', label: 'Nobody answered' },
+    { value: 'WRONG_ADDRESS', label: 'Address is wrong' },
+    { value: 'REFUSED', label: 'Customer refused it' },
+    { value: 'NO_CASH', label: 'Customer had no cash' },
+    { value: 'OTHER', label: 'Something else' },
+  ];
+
+  if (failing) {
+    return (
+      <div className="mt-3 rounded-xl bg-surface-sunk p-3">
+        <p className="text-sm font-bold">What happened?</p>
+        <div className="mt-2 space-y-1.5">
+          {reasons.map((r) => (
+            <label key={r.value} className="flex items-center gap-2 text-sm">
+              <input
+                type="radio"
+                name="fail-reason"
+                checked={reason === r.value}
+                onChange={() => setReason(r.value)}
+              />
+              {r.label}
+            </label>
+          ))}
+        </div>
+        <input
+          className="field mt-2 w-full text-sm"
+          placeholder="Anything to add (optional)"
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+        />
+        <div className="mt-2 flex gap-2">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={async () => {
+              await onFail(reason, note);
+              setFailing(false);
+              setAttempted(true);
+              setNote('');
+            }}
+            className="flex-1 rounded-full bg-brand px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60"
+          >
+            Save and move on
+          </button>
+          <button
+            type="button"
+            onClick={() => setFailing(false)}
+            className="rounded-full border border-surface-line px-4 py-2.5 text-sm font-bold text-ink-muted"
+          >
+            Back
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-3">
+      <div className="flex gap-2">
+        {/* Left blank when the shop does not ask for a code — the server decides, and an
+            empty box costs nothing. Typing one where none is required is simply ignored. */}
+        <input
+          className="field w-28 text-center text-lg font-bold tracking-[0.3em]"
+          inputMode="numeric"
+          maxLength={6}
+          placeholder="Code"
+          value={otp}
+          onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))}
+        />
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => onDeliver(otp)}
+          className="flex-1 rounded-full bg-brand px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60"
+        >
+          Delivered
+        </button>
+      </div>
+      <div className="mt-2 flex items-center gap-4">
+        <button
+          type="button"
+          onClick={() => setFailing(true)}
+          className="text-sm font-semibold text-ink-muted underline"
+        >
+          Couldn’t deliver
+        </button>
+        {attempted && (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onReturn}
+            className="text-sm font-semibold text-red-700 underline disabled:opacity-60"
+          >
+            Take it back to the shop
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
  * The run: every counter and every door, in the order they should be visited.
  *
  * Only the **next** stop can be acted on. That is not a UI simplification — a rider who
@@ -187,7 +315,10 @@ function Run({ token }: { token: string }) {
     return () => clearInterval(timer);
   }, [load]);
 
-  const call = async (path: 'trip/plan' | 'trip/stop', body: Record<string, unknown>) => {
+  const call = async (
+    path: 'trip/plan' | 'trip/stop' | 'trip/failed' | 'trip/return',
+    body: Record<string, unknown> = {},
+  ) => {
     setBusy(path);
     setError(null);
     try {
@@ -282,17 +413,26 @@ function Run({ token }: { token: string }) {
                       Go
                     </a>
                   )}
-                  {stop.active && (
+                  {stop.active && stop.kind === 'PICKUP' && (
                     <button
                       type="button"
                       onClick={() => call('trip/stop', { stopId: stop.id })}
                       disabled={busy !== null}
                       className="flex-1 rounded-full bg-brand px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60"
                     >
-                      {stop.kind === 'PICKUP' ? 'Got it' : 'Delivered'}
+                      Got it
                     </button>
                   )}
                 </div>
+              )}
+
+              {stop.active && stop.kind === 'DROP' && !stop.done && (
+                <Handover
+                  busy={busy !== null}
+                  onDeliver={(otp) => call('trip/stop', { stopId: stop.id, otp })}
+                  onFail={(reason, note) => call('trip/failed', { stopId: stop.id, reason, note })}
+                  onReturn={() => call('trip/return', { stopId: stop.id })}
+                />
               )}
             </li>
           );

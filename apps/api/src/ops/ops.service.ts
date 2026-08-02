@@ -8,9 +8,12 @@ import {
 import { Cron } from '@nestjs/schedule';
 import { randomBytes } from 'node:crypto';
 import {
+  DELIVERY_OTP_MAX_ATTEMPTS,
   RIDER_FIX_MAX_ACCURACY_M,
+  deliveryOtpMatches,
   planStops,
   riderCoversDelivery,
+  type AttemptFailReason,
   type DeliveryTarget,
   type GeoPoint,
   type GeoShape,
@@ -679,18 +682,9 @@ export class OpsService {
    * screen and quietly skip the money. The one thing written directly is `pickedUpAt`,
    * which no other code owns.
    */
-  async completeStop(token: string, stopId: string) {
+  async completeStop(token: string, stopId: string, otp?: string) {
     const rider = await this.riderByToken(token);
-
-    const stop = await this.prisma.db.tripStop.findUnique({
-      where: { id: stopId },
-      select: {
-        id: true, kind: true, orderId: true, tenantId: true, completedAt: true, tripId: true,
-        trip: { select: { riderId: true, status: true } },
-      },
-    });
-    // Stop ids arrive from a phone, so the owning rider is checked rather than assumed.
-    if (!stop || stop.trip.riderId !== rider.id) throw new NotFoundException('That stop is not on your run');
+    const stop = await this.stopOnMyRun(rider.id, stopId);
     if (stop.completedAt) return this.tripSheet(token);
 
     // Out of order is refused. A rider who marks the third drop done from the first one's
@@ -730,6 +724,7 @@ export class OpsService {
         );
       }
     } else {
+      await this.checkDeliveryOtp(stop.tenantId, stop.orderId, otp);
       await TenantContext.runAsTenant(stop.tenantId, () =>
         this.orders.updateStatus(stop.orderId, 'DELIVERED', `rider:${rider.id}`, 'Handed over by the rider'),
       );
@@ -738,6 +733,171 @@ export class OpsService {
     await this.prisma.db.tripStop.update({ where: { id: stop.id }, data: { completedAt: new Date() } });
     await this.advanceTrip(stop.tripId);
     return this.tripSheet(token);
+  }
+
+  /**
+   * The code at the door.
+   *
+   * A wrong code is counted before it is rejected, because a counter that only advances on
+   * the way out is a counter that can be avoided by hanging up. After
+   * `DELIVERY_OTP_MAX_ATTEMPTS` the rider is sent to the shop rather than left standing at
+   * a door with nothing to try — the shop can still release the delivery from its own
+   * panel, and that release is an OrderEvent, so who waived the proof is on the record.
+   */
+  private async checkDeliveryOtp(tenantId: string, orderId: string, given?: string) {
+    await TenantContext.runAsTenant(tenantId, async () => {
+      const [shop, order] = await Promise.all([
+        this.prisma.db.tenant.findUnique({
+          where: { id: tenantId },
+          select: { deliveryOtpRequired: true, phone: true },
+        }),
+        this.prisma.db.order.findUnique({
+          where: { id: orderId },
+          select: { deliveryOtp: true, deliveryOtpAttempts: true },
+        }),
+      ]);
+      if (!shop?.deliveryOtpRequired) return;
+      if (!order) throw new NotFoundException('Order not found');
+      // No code was ever issued (the order reached the road before this was switched on).
+      // Demanding one the customer never received would strand a real delivery.
+      if (!order.deliveryOtp) return;
+
+      if (order.deliveryOtpAttempts >= DELIVERY_OTP_MAX_ATTEMPTS) {
+        throw new BadRequestException(
+          shop.phone
+            ? `Too many wrong codes. Call the shop on ${shop.phone}.`
+            : 'Too many wrong codes. Call the shop.',
+        );
+      }
+      if (!given) throw new BadRequestException('Ask the customer for their delivery code');
+
+      if (!deliveryOtpMatches(order.deliveryOtp, given)) {
+        const attempts = order.deliveryOtpAttempts + 1;
+        await this.prisma.db.order.update({
+          where: { id: orderId },
+          data: { deliveryOtpAttempts: attempts },
+        });
+        const left = DELIVERY_OTP_MAX_ATTEMPTS - attempts;
+        throw new BadRequestException(
+          left > 0 ? `That code is wrong — ${left} more ${left === 1 ? 'try' : 'tries'}` : 'Too many wrong codes. Call the shop.',
+        );
+      }
+    });
+  }
+
+  /**
+   * A delivery that did not happen.
+   *
+   * Recorded with a reason and moved to the **end** of the run rather than closed: in a
+   * village the answer to "nobody home" is usually "come back after the others", and a
+   * failed knock at three o'clock is not the same as a parcel going back on the shelf.
+   * Taking it back is a separate, deliberate act — `returnStop`.
+   */
+  async failStop(token: string, stopId: string, reason: AttemptFailReason, note?: string) {
+    const rider = await this.riderByToken(token);
+    const stop = await this.stopOnMyRun(rider.id, stopId);
+    if (stop.kind !== 'DROP') throw new BadRequestException('Only a delivery can fail this way');
+    if (stop.completedAt) throw new BadRequestException('That stop is already done');
+
+    await this.prisma.db.deliveryAttempt.create({
+      data: {
+        orderId: stop.orderId,
+        riderId: rider.id,
+        reason,
+        note: note?.trim() || null,
+        // Where the rider says they were. An attempt filed from the shop's own courtyard
+        // is worth being able to recognise later.
+        lat: rider.lat,
+        lng: rider.lng,
+      },
+    });
+
+    const last = await this.prisma.db.tripStop.findFirst({
+      where: { tripId: stop.tripId },
+      orderBy: { seq: 'desc' },
+      select: { seq: true },
+    });
+    await this.prisma.db.tripStop.update({
+      where: { id: stop.id },
+      data: { seq: (last?.seq ?? stop.seq) + 1 },
+    });
+
+    await this.advanceTrip(stop.tripId);
+    return this.tripSheet(token);
+  }
+
+  /** Taking it back to the shop. Ends the delivery; whether money returns is the shop's call. */
+  async returnStop(token: string, stopId: string) {
+    const rider = await this.riderByToken(token);
+    const stop = await this.stopOnMyRun(rider.id, stopId);
+    if (stop.kind !== 'DROP') throw new BadRequestException('Only a delivery can be returned');
+    if (stop.completedAt) throw new BadRequestException('That stop is already done');
+
+    await TenantContext.runAsTenant(stop.tenantId, () =>
+      this.orders.updateStatus(
+        stop.orderId,
+        'RETURNED',
+        `rider:${rider.id}`,
+        'Brought back to the shop undelivered',
+      ),
+    );
+
+    await this.prisma.db.tripStop.update({ where: { id: stop.id }, data: { completedAt: new Date() } });
+    // The pickup half is done too — there is nothing left to collect for this order.
+    await this.prisma.db.tripStop.updateMany({
+      where: { tripId: stop.tripId, orderId: stop.orderId, completedAt: null },
+      data: { completedAt: new Date() },
+    });
+    await this.advanceTrip(stop.tripId);
+    return this.tripSheet(token);
+  }
+
+  /**
+   * The shop letting a delivery through without the code.
+   *
+   * The rider is at the door, the customer has lost the text, and somebody has to be able
+   * to say "give it to them". Clearing the attempt counter rather than deleting the code
+   * keeps the release **on the record** — an OrderEvent with the vendor's user id on it —
+   * so a shop that waives proof for every order can be seen doing it.
+   */
+  async releaseDeliveryProof(tenantId: string, orderId: string, actor: string) {
+    return TenantContext.runAsTenant(tenantId, async () => {
+      const order = await this.prisma.db.order.findUnique({
+        where: { id: orderId },
+        select: { id: true, status: true },
+      });
+      if (!order) throw new NotFoundException('Order not found');
+      if (order.status !== 'ON_THE_WAY') {
+        throw new BadRequestException('Only an order on the road needs its code released');
+      }
+
+      await this.prisma.db.order.update({
+        where: { id: orderId },
+        data: { deliveryOtp: null, deliveryOtpAttempts: 0 },
+      });
+      await this.prisma.db.orderEvent.create({
+        data: {
+          orderId,
+          status: 'ON_THE_WAY',
+          actor,
+          note: 'Delivery code waived by the shop',
+        },
+      });
+      return { ok: true };
+    });
+  }
+
+  /** A stop, confirmed to be on this rider's own run. Ids arrive from a phone. */
+  private async stopOnMyRun(riderId: string, stopId: string) {
+    const stop = await this.prisma.db.tripStop.findUnique({
+      where: { id: stopId },
+      select: {
+        id: true, seq: true, kind: true, orderId: true, tenantId: true, completedAt: true, tripId: true,
+        trip: { select: { riderId: true, status: true } },
+      },
+    });
+    if (!stop || stop.trip.riderId !== riderId) throw new NotFoundException('That stop is not on your run');
+    return stop;
   }
 
   private seqOf(stopId: string): Promise<number> {

@@ -94,6 +94,8 @@ export class TenantService {
       'aiAssistantEnabled', 'aiPersona',
       // Payment policy — what must be paid before the kitchen starts.
       'codEnabled', 'advancePercent', 'advanceThreshold',
+      // Proof at the door.
+      'deliveryOtpRequired',
       // Ordering for later.
       'schedulingEnabled', 'schedulingMaxDays',
       // The vendor's own ad accounts and invite programme.

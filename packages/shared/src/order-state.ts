@@ -4,7 +4,7 @@ import { OrderStatus } from './enums';
  * The order lifecycle is identical for both channels — only settlement differs.
  *
  *   PENDING -> CONFIRMED -> PREPARING -> READY -> ON_THE_WAY -> DELIVERED
- *                       \-> CANCELLED / REFUNDED
+ *                       \-> CANCELLED / REFUNDED      \-> RETURNED -> REFUNDED
  *
  * This is the single source of truth for legal transitions; the API refuses
  * anything not listed here so a buggy client can't walk an order backwards.
@@ -14,8 +14,11 @@ export const ORDER_TRANSITIONS: Record<OrderStatus, readonly OrderStatus[]> = {
   CONFIRMED: ['PREPARING', 'CANCELLED'],
   PREPARING: ['READY', 'CANCELLED'],
   READY: ['ON_THE_WAY', 'DELIVERED', 'CANCELLED'],
-  ON_THE_WAY: ['DELIVERED', 'CANCELLED'],
+  // RETURNED is reachable only from the road, because that is the only place it can
+  // happen: the rider went, knocked, and came back with it.
+  ON_THE_WAY: ['DELIVERED', 'RETURNED', 'CANCELLED'],
   DELIVERED: ['REFUNDED'],
+  RETURNED: ['REFUNDED'],
   CANCELLED: ['REFUNDED'],
   REFUNDED: [],
 };
@@ -31,7 +34,14 @@ export function assertTransition(from: OrderStatus, to: OrderStatus): void {
 }
 
 /** Terminal states never change again and free up any held stock/quota. */
-export const TERMINAL_STATUSES: readonly OrderStatus[] = ['DELIVERED', 'CANCELLED', 'REFUNDED'];
+export const TERMINAL_STATUSES: readonly OrderStatus[] = [
+  'DELIVERED',
+  // The parcel is back on the shelf and nobody is waiting on it any more. A refund may
+  // still follow, exactly as it may after a cancellation.
+  'RETURNED',
+  'CANCELLED',
+  'REFUNDED',
+];
 
 /**
  * What a CUSTOMER may cancel, which is deliberately narrower than what a vendor may.
@@ -69,6 +79,7 @@ export const ORDER_STATUS_LABEL: Record<OrderStatus, string> = {
   READY: 'Ready',
   ON_THE_WAY: 'On the way',
   DELIVERED: 'Delivered',
+  RETURNED: 'Returned to shop',
   CANCELLED: 'Cancelled',
   REFUNDED: 'Refunded',
 };

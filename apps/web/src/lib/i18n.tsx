@@ -68,6 +68,9 @@ const en = {
   'order.delivered': 'Delivered',
   'order.cancelled': 'Cancelled',
 
+  'order.otpTitle': 'Your delivery code',
+  'order.otpHint': 'Read this out to the rider when they arrive',
+
   'rider.call': 'Call',
   'rider.onTheWay': 'On the way to you',
   'rider.away': '{km} km away',
@@ -129,6 +132,9 @@ const bn: Partial<Record<Key, string>> = {
   'order.etaPickup': '{window}-এ তৈরি হবে',
   'order.delivered': 'ডেলিভারি হয়েছে',
   'order.cancelled': 'বাতিল',
+
+  'order.otpTitle': 'আপনার ডেলিভারি কোড',
+  'order.otpHint': 'রাইডার এলে এই কোডটি বলুন',
 
   'rider.call': 'ফোন',
   'rider.onTheWay': 'আপনার দিকে আসছে',

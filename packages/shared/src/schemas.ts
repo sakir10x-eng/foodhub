@@ -257,6 +257,7 @@ export const orderStatusUpdateSchema = z.object({
     'READY',
     'ON_THE_WAY',
     'DELIVERED',
+    'RETURNED',
     'CANCELLED',
     'REFUNDED',
   ]),
@@ -378,6 +379,14 @@ export const tenantSettingsSchema = z.object({
    * customer, and 50/100 is what the vendors actually asked for.
    */
   codEnabled: z.boolean().optional(),
+  /**
+   * Ask for the customer's code at the door before a delivery may be marked done.
+   *
+   * Off by default. Switching it on for every shop at once would stop deliveries wherever
+   * customers have not seen the code, so this is opt-in per vendor — and the code appears
+   * on the customer's own tracker as well as by SMS, so it works where SMS does not.
+   */
+  deliveryOtpRequired: z.boolean().optional(),
   advancePercent: z
     .union([z.literal(0), z.literal(50), z.literal(100)])
     .optional(),

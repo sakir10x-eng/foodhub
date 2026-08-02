@@ -6,6 +6,7 @@ import {
   estimateEta,
   etaClock,
   isFixFresh,
+  makeDeliveryOtp,
   riderCoordsVisible,
   riderVisibleFor,
   type TripPosition,
@@ -202,6 +203,21 @@ export class OrdersService {
         if (next === 'CANCELLED') {
           data.cancelledAt = new Date();
           data.cancelReason = note ?? null;
+        }
+        if (next === 'RETURNED') {
+          // Nothing was collected and nothing settles. The parcel is back on the shelf and
+          // whether money goes back to the customer is a separate decision — REFUNDED.
+          data.cancelledAt = new Date();
+          data.cancelReason = note ?? 'Returned to the shop undelivered';
+        }
+
+        // The door code is minted when the order actually goes onto the road, and only
+        // once. Issuing it earlier hands the customer something to lose while the food is
+        // still being cooked; re-issuing it on a second pass through ON_THE_WAY would
+        // invalidate the number they are already holding.
+        if (next === 'ON_THE_WAY' && !order.deliveryOtp) {
+          data.deliveryOtp = makeDeliveryOtp();
+          data.deliveryOtpAttempts = 0;
         }
 
         // ── settlement: marketplace money only, and only once
@@ -442,6 +458,11 @@ export function toDto(order: any): OrderDto {
     // kitchen (whether the money is already in), so it travels with every order.
     advanceAmount: order.advanceAmount ?? 0,
     dueOnDelivery: order.dueOnDelivery ?? 0,
+    // The door code. This DTO is served to the customer (who needs to read it out) and to
+    // the vendor (who can release a delivery without it) — never to the rider, whose run
+    // sheet is built from its own selects in ops.service.ts and does not include it. A
+    // code the rider can see is not proof of anything.
+    deliveryOtp: order.deliveryOtp ?? null,
     items: (order.items ?? []).map((i: any) => ({
       id: i.id,
       productId: i.productId,

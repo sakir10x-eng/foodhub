@@ -103,6 +103,16 @@ class VendorOpsController {
     return this.ops.assignRider(tenant.id, id, dto.riderId);
   }
 
+  /** Let a delivery through without the customer's code. Recorded as an OrderEvent. */
+  @Post('orders/:id/release-proof')
+  releaseProof(
+    @CurrentTenant() tenant: RequestTenant,
+    @CurrentUser() user: AuthedUser,
+    @Param('id') id: string,
+  ) {
+    return this.ops.releaseDeliveryProof(tenant.id, id, `vendor:${user.id}`);
+  }
+
   /** A vendor answering a review in public. */
   @Post('reviews/:id/reply')
   reply(
@@ -158,13 +168,6 @@ class RiderController {
     return { accepted: result.accepted, sharingWith: result.orders };
   }
 
-  /**
-   * The rider accepting or declining a shop that has asked to work with them.
-   *
-   * Authorised by the same token as the run sheet, because that token is already the proof
-   * of who they are — requiring a login here would mean the consent step could not ship
-   * until riders had accounts, and the invitation is what makes sharing a rider safe.
-   */
   /** Going on or off the road. Off is the default, and only the rider flips it. */
   @Public()
   @PlatformScope('a rider goes on duty against its own run-sheet token')
@@ -221,16 +224,54 @@ class RiderController {
     return this.ops.planTrip(dto.token);
   }
 
-  /** Collected at a counter, or handed over at a door. */
+  /** Collected at a counter, or handed over at a door — with the customer's code if asked. */
   @Public()
   @PlatformScope('a rider completes a stop on its own run against its own run-sheet token')
   @Post('trip/stop')
   completeStop(
-    @Body(new ZodBody(z.object({ token: z.string().min(1), stopId: z.string().uuid() }))) dto: any,
+    @Body(new ZodBody(z.object({
+      token: z.string().min(1),
+      stopId: z.string().uuid(),
+      otp: z.string().trim().max(10).optional(),
+    })))
+    dto: any,
   ) {
-    return this.ops.completeStop(dto.token, dto.stopId);
+    return this.ops.completeStop(dto.token, dto.stopId, dto.otp);
   }
 
+  /** Knocked, and it did not happen. Goes to the end of the run to be tried again. */
+  @Public()
+  @PlatformScope('a rider records a failed attempt on its own run against its own run-sheet token')
+  @Post('trip/failed')
+  failStop(
+    @Body(new ZodBody(z.object({
+      token: z.string().min(1),
+      stopId: z.string().uuid(),
+      reason: z.enum(['NO_ANSWER', 'WRONG_ADDRESS', 'REFUSED', 'NO_CASH', 'OTHER']),
+      note: z.string().trim().max(300).optional(),
+    })))
+    dto: any,
+  ) {
+    return this.ops.failStop(dto.token, dto.stopId, dto.reason, dto.note);
+  }
+
+  /** Taking it back to the shop. */
+  @Public()
+  @PlatformScope('a rider returns a parcel on its own run against its own run-sheet token')
+  @Post('trip/return')
+  returnStop(
+    @Body(new ZodBody(z.object({ token: z.string().min(1), stopId: z.string().uuid() }))) dto: any,
+  ) {
+    return this.ops.returnStop(dto.token, dto.stopId);
+  }
+
+  /**
+   * The rider accepting or declining a shop that has asked to work with them.
+   *
+   * Authorised by the same token as the run sheet, because that token is already the proof
+   * of who they are — requiring a login here would mean the consent step could not ship
+   * until riders had accounts, and the invitation is what makes sharing a rider safe.
+   */
   @Public()
   @PlatformScope('a rider answers an invitation against its own run-sheet token')
   @Post('invites')

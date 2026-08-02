@@ -16,6 +16,14 @@ export const OrderStatus = {
   READY: 'READY',
   ON_THE_WAY: 'ON_THE_WAY',
   DELIVERED: 'DELIVERED',
+  /**
+   * Carried out, not handed over, and brought back to the shop.
+   *
+   * Distinct from CANCELLED because the goods were made and the journey was ridden: the
+   * cost is already spent and only the collection failed. Rolling the two together would
+   * hide the number every shop needs most — how often nobody answers the door.
+   */
+  RETURNED: 'RETURNED',
   CANCELLED: 'CANCELLED',
   REFUNDED: 'REFUNDED',
 } as const;

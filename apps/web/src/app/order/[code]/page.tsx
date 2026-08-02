@@ -128,6 +128,21 @@ export default function OrderPage({ params }: { params: Promise<{ code: string }
           the orders service. The map does not decide who may be watched. */}
       {order.rider && <TrackingMap rider={order.rider} destination={order.destination ?? null} />}
 
+      {/* The code the rider will ask for.
+          Shown here as well as texted, and that is not a convenience: SMS costs money, is
+          not configured everywhere, and arrives late often enough that a code which only
+          existed in a text would strand real deliveries. The customer already proved who
+          they are to reach this page. */}
+      {order.deliveryOtp && order.status === 'ON_THE_WAY' && (
+        <section className="card mt-4 p-4 text-center">
+          <p className="text-sm text-ink-muted">{t('order.otpTitle')}</p>
+          <p className="mt-1 text-4xl font-extrabold tabular-nums tracking-[0.3em]">
+            {localiseDigits(order.deliveryOtp, locale)}
+          </p>
+          <p className="mt-1 text-xs text-ink-faint">{t('order.otpHint')}</p>
+        </section>
+      )}
+
       <div className="card mt-5 p-4">
         {cancelled ? (
           <p className="text-sm font-semibold text-red-700">{ORDER_STATUS_LABEL[order.status]}</p>
